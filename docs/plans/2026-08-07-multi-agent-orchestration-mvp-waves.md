@@ -201,6 +201,7 @@ Skill 只理解用户目标、具体 Workflow 和人工检查点，不能拼接 
 - `capabilities()` 明确 `supported`、`unsupported`、`degraded`；不支持 sandbox、strict MCP、follow-up 或 cancel 时 fail closed/降级，不伪造能力。
 - `preflight()` 在 Attempt 前完成版本、workspace trust、权限、模型、MCP 和 artifact 能力检查。
 - `extractIdentity()` 校验 provider/session/workspace/launch canary；错配为 `contaminated`，未知不走普通 retry。
+- Adapter 必须区分配置登记的 primary model 与 Provider `modelUsage` 中可能出现的内部辅助模型；主绑定不一致时进入诊断/人工检查，不能静默改名或把辅助模型当成实际登记模型。
 - CLI Adapter 的 `send` follow-up 只由核心状态允许，不能根据 exit 0 自行补发。
 
 ### 测试与证据
