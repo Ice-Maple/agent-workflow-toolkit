@@ -47,6 +47,30 @@ The probe intentionally has no `continue:false` output. It cannot change the
 compact result and therefore cannot create the `TurnAborted` failure being
 verified.
 
+## Wave 1 local continuity smoke
+
+Wave 1 adds the first user-visible continuity path. Its isolated fixture is
+`fixtures/wave1/hooks.example.json`; it invokes `session_start.py` and
+`stop.py` directly, so both scripts support direct-file execution as well as
+`python -m` execution.
+
+Before starting an isolated Codex CLI/App process, set a private state root in
+that process environment, for example:
+
+```powershell
+$env:CODEX_CONTEXT_CONTINUITY_HOME = Join-Path ([IO.Path]::GetTempPath()) "codex-context-continuity-wave1"
+```
+
+Then replace `<REPO_ROOT>` in the fixture, review/trust the exact hooks, and
+run a two-turn task. At the first turn's stop, the Hook should request one
+checkpoint seal. After writing the concise `checkpoint.md` at the injected
+path and running the injected seal command, the same turn may end. A later
+`SessionStart(source=compact)` should inject that checkpoint.
+
+Wave 1 intentionally has no `PreToolUse` dirty tracking and no `PreCompact`
+Hook. A mid-turn automatic compact before the first seal remains a known Wave 1
+gap and is covered by Wave 2.
+
 ## Evidence requirements
 
 At minimum capture:

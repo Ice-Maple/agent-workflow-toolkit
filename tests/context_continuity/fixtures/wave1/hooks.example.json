@@ -1,0 +1,32 @@
+{
+  "description": "Wave 1 SessionStart/Stop continuity hooks. Replace <REPO_ROOT> before use.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/session_start.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\session_start.py\"",
+            "timeout": 10,
+            "statusMessage": "Loading context continuity checkpoint"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/stop.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\stop.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking context continuity checkpoint"
+          }
+        ]
+      }
+    ]
+  }
+}
