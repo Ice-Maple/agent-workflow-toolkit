@@ -1,0 +1,6 @@
+{
+  "protocol_version": 2,
+  "request_id": "wave0-request-unsupported-major",
+  "operation": "runPreflight",
+  "payload": {}
+}

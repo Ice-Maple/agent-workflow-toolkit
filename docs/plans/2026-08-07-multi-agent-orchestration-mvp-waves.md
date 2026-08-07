@@ -1,7 +1,7 @@
 # 多 Agent 协同 Workflow MVP 实施 Wave 计划
 
 - 日期：2026-08-07
-- 状态：规划中，等待 Wave 0 启动确认
+- 状态：Wave 0 实施中（协议合同与 fake contract 已通过本地 Go 验证）
 - 设计基线：[多 Agent 协同 Workflow MVP](../brainstorms/2026-08-07-multi-agent-orchestration-mvp.md)
 - 独立复审处理：[复审问题处理记录](../reviews/2026-08-07-multi-agent-orchestration-mvp-rereview-closure.md)
 - 研究与执行证据：[Cursor Agent 评审派发与结果交付调查](../research/2026-08-07-cursor-agent-review-delivery-investigation.md)
@@ -321,6 +321,6 @@ Wave 0 通过后，第一轮实际实现建议按以下原子任务建立提交�
 
 ## 当前决策点
 
-当前建议直接启动 Wave 0。Wave 0 不是“实现前的空转”：它会产出 protocol v1、能力探针、fake contract 和证据格式，为 Wave 1/2 的快速闭环减少返工。
+Wave 0 已启动并完成第一批可执行产物：protocol v1、能力探针入口、fake contract 和证据格式。Go 工具链当前通过绝对路径调用；待用户重启 Codex App 后再验证新 PATH，不影响本轮实现。
 
 Wave 0 完成后应再次停在人工检查点，确认实际宿主能力和合同，再进入 Wave 1；不自动连续执行后续 Wave。

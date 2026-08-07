@@ -1,0 +1,14 @@
+{
+  "protocol_version": 1,
+  "request_id": "wave0-request-001",
+  "operation": "runPreflight",
+  "payload": {
+    "node_id": "node-fixture-001",
+    "binding": {
+      "role": "reviewer",
+      "adapter": "fake",
+      "model": "fixture-model",
+      "reasoning": "high"
+    }
+  }
+}
