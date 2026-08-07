@@ -342,7 +342,7 @@ Codex 系统 `skill-creator` 中的 `quick_validate.py` 可以在本机作为补
 - 明确禁止的行为；
 - 逐项通过/失败判定。
 
-被测 Agent 只能获得原始用户提示、待测 Skill 和最小任务工作区，不能读取本方案、Grok 评审、测试判定或既有运行证据。测试工作区不得包含 `tests/brainstorming/` 和 `references/sessions/`，避免从预期答案反推行为。
+被测 Agent 只能获得原始用户提示、待测 Skill 和最小任务工作区，不能读取本方案、Grok 评审、测试判定或既有运行证据。每次运行在仓库外新建临时工作区，只复制待测 `SKILL.md` 和直接引用文件；使用外部 Codex CLI 的 read-only 模式，忽略项目规则并禁用 hooks 和 MCP。保留当前认证所需的用户配置；单轮 case 使用 ephemeral 会话，B-05、B-06 只为必要后续回复暂时保留会话。共享仓库的 native subagent 运行只能作为预检，不能计入完成证据。
 
 ### 9.3 行为验证场景
 
@@ -369,9 +369,10 @@ tests/brainstorming/evidence/<YYYY-MM-DD>/<case-id>-run-<n>.md
 
 - case ID 和运行序号；
 - Skill 文件 SHA-256；
-- 宿主、模型和日期；
+- 宿主、模型、CLI 版本和日期；
+- 临时工作区路径和启动参数；
 - 提供给 Agent 的原始提示和用户后续回复；
-- Agent 的完整可见消息；
+- Agent 的完整可见消息；可以保存为相邻的 raw turn 文件并由运行记录引用；
 - 对照 case 判定表的逐项结果；
 - 总体 PASS/FAIL；
 - 若失败，失败行为和后续修订引用。

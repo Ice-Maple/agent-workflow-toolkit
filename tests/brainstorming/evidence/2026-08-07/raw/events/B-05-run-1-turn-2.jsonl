@@ -1,0 +1,5 @@
+﻿{"type":"thread.started","thread_id":"019fda9a-83ea-74b3-8bc2-fd6584c9b2d3"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"`[features].codex_hooks` is deprecated. Use `[features].hooks` instead. (Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details.)"}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"已确定：第一版仅前台托管；异常退出将当前执行尝试标记为“中断”，任务本身仍未完成，必须由用户显式 `resume`。\n\n下一项重大取舍是：`resume` 到底恢复什么？\n\n- **重新执行**：创建一次新尝试，从头调用同一 adapter。语义统一、实现最简单，但可能重复外部副作用。\n- **原地续接**：保存 adapter 提供的会话 ID、检查点等信息，要求它从中断点继续。副作用风险较低，但三个 CLI 可能无法提供一致能力。\n- **能力协商**：adapter 支持续接时原地继续，否则提示用户选择重新执行或放弃。更安全、兼容性更强，但会引入分支行为和额外交互。\n\n你希望第一版采用哪种 `resume` 语义？"}}
+{"type":"turn.completed","usage":{"input_tokens":62822,"cached_input_tokens":37120,"output_tokens":1872,"reasoning_output_tokens":1256}}
