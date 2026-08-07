@@ -55,6 +55,10 @@ SQLite、看板、daemon、tmux、完整 mailbox、OpenCode/Kilo 和复杂恢复
 
 这些方向不是固定路线图或范围上限，优先级和实现方式在各自开始前单独讨论。
 
+## 使用入口
+
+- [功能入口清单](docs/guides/agent-capabilities.md)
+
 ## 设计资料
 
 - [仓库定位、需求与首个 milestone](docs/brainstorms/2026-08-07-agent-workflow-toolkit.md)
