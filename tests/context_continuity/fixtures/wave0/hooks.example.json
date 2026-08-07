@@ -1,0 +1,60 @@
+{
+  "description": "Wave 0 observational Codex lifecycle probe. Replace <REPO_ROOT> and <PROBE_LOG_DIR> before use.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/probe_hooks.py\" --log-dir \"<PROBE_LOG_DIR>\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\probe_hooks.py\" --log-dir \"<PROBE_LOG_DIR>\"",
+            "timeout": 10,
+            "statusMessage": "Recording Wave 0 SessionStart metadata"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/probe_hooks.py\" --log-dir \"<PROBE_LOG_DIR>\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\probe_hooks.py\" --log-dir \"<PROBE_LOG_DIR>\"",
+            "timeout": 10,
+            "statusMessage": "Recording Wave 0 PreCompact metadata"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/probe_hooks.py\" --log-dir \"<PROBE_LOG_DIR>\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\probe_hooks.py\" --log-dir \"<PROBE_LOG_DIR>\"",
+            "timeout": 10,
+            "statusMessage": "Recording Wave 0 PostCompact metadata"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/probe_hooks.py\" --log-dir \"<PROBE_LOG_DIR>\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\probe_hooks.py\" --log-dir \"<PROBE_LOG_DIR>\"",
+            "timeout": 10,
+            "statusMessage": "Recording Wave 0 Stop metadata"
+          }
+        ]
+      }
+    ]
+  }
+}
