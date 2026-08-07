@@ -18,6 +18,13 @@ import unicodedata
 SCHEMA_VERSION = 1
 MAX_CHECKPOINT_CHARS = 2400
 MAX_EMERGENCY_CHARS = 1200
+MAX_HOT_CHARS = 2400
+MAX_HOT_ESTIMATED_TOKENS = 600
+MAX_WARM_ESTIMATED_TOKENS = 1500
+MAX_EMERGENCY_ESTIMATED_TOKENS = 250
+MAX_ACTIVE_SUBAGENTS = 16
+MAX_TOOL_NAME_CHARS = 256
+TOOL_CATEGORIES = {"write", "read_evidence", "state", "unknown"}
 VALID_STATUSES = {
     "dirty",
     "safe",
@@ -84,6 +91,12 @@ def state_path(session_dir: Path) -> Path:
 
 def checkpoint_path(session_dir: Path) -> Path:
     return session_dir / "checkpoint.md"
+
+
+def hot_path(session_dir: Path) -> Path:
+    """Return the optional hot-state file used for compact recovery."""
+
+    return session_dir / "hot.md"
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -243,17 +256,65 @@ def validate_state(state: Any) -> str | None:
         return "invalid last_compact_trigger"
     for field in (
         "last_tool_name",
+        "last_tool_category",
+        "last_tool_use_hash",
+        "last_tool_input_hash",
+        "last_dirty_reason",
         "transcript_path",
         "last_compact_started_at",
         "last_compact_completed_at",
         "last_compact_result",
+        "last_subagent_id_hash",
+        "last_subagent_type",
+        "last_subagent_status",
+        "last_subagent_message_hash",
     ):
         if state.get(field) is not None and not isinstance(state.get(field), str):
             return f"invalid {field}"
-    if state.get("last_tool_name") is not None and len(state["last_tool_name"]) > 256:
+    if state.get("last_tool_name") is not None and len(state["last_tool_name"]) > MAX_TOOL_NAME_CHARS:
         return "last_tool_name is too long"
+    if state.get("last_tool_category") not in (None, *TOOL_CATEGORIES):
+        return "invalid last_tool_category"
+    for field in ("last_tool_use_hash", "last_tool_input_hash", "last_subagent_id_hash", "last_subagent_message_hash"):
+        if state.get(field) is not None and not _valid_digest(state.get(field), allow_none=False):
+            return f"invalid {field}"
     if state.get("transcript_path") is not None and len(state["transcript_path"]) > 4096:
         return "transcript_path is too long"
+    hot_chars = state.get("hot_chars", 0)
+    if not isinstance(hot_chars, int) or isinstance(hot_chars, bool) or not 0 <= hot_chars <= MAX_HOT_CHARS:
+        return "invalid hot_chars"
+    hot_tokens = state.get("hot_estimated_tokens", 0)
+    if (
+        not isinstance(hot_tokens, int)
+        or isinstance(hot_tokens, bool)
+        or not 0 <= hot_tokens <= MAX_HOT_ESTIMATED_TOKENS
+    ):
+        return "invalid hot_estimated_tokens"
+    warm_tokens = state.get("warm_estimated_tokens", 0)
+    if (
+        not isinstance(warm_tokens, int)
+        or isinstance(warm_tokens, bool)
+        or not 0 <= warm_tokens <= MAX_WARM_ESTIMATED_TOKENS
+    ):
+        return "invalid warm_estimated_tokens"
+    if state.get("hot_hash") is not None and not _valid_digest(state.get("hot_hash"), allow_none=False):
+        return "invalid hot_hash"
+    if state.get("hot_hash") is None and (hot_chars != 0 or hot_tokens != 0):
+        return "hot metadata is inconsistent"
+    active_subagents = state.get("active_subagents", [])
+    if not isinstance(active_subagents, list) or len(active_subagents) > MAX_ACTIVE_SUBAGENTS:
+        return "invalid active_subagents"
+    for item in active_subagents:
+        if not isinstance(item, dict):
+            return "invalid active_subagent entry"
+        if not _valid_digest(item.get("agent_id_hash"), allow_none=False):
+            return "invalid active_subagent agent_id_hash"
+        if item.get("status") not in ("running", "unknown"):
+            return "invalid active_subagent status"
+        if not isinstance(item.get("agent_type", "unknown"), str) or len(item.get("agent_type", "unknown")) > 160:
+            return "invalid active_subagent agent_type"
+    if state.get("last_subagent_status") not in (None, "running", "completed", "unknown"):
+        return "invalid last_subagent_status"
     emergency_chars = state.get("emergency_manifest_chars", 0)
     if (
         not isinstance(emergency_chars, int)
@@ -265,7 +326,7 @@ def validate_state(state: Any) -> str | None:
     if (
         not isinstance(emergency_tokens, int)
         or isinstance(emergency_tokens, bool)
-        or not 0 <= emergency_tokens <= 250
+        or not 0 <= emergency_tokens <= MAX_EMERGENCY_ESTIMATED_TOKENS
     ):
         return "invalid emergency_manifest_estimated_tokens"
     if state.get("emergency_manifest_hash") is not None and not _valid_digest(
@@ -308,13 +369,19 @@ def _checkpoint_content(
         return None, "checkpoint is not sealed"
     checkpoint = checkpoint_path(session_dir)
     try:
-        content = checkpoint.read_text(encoding="utf-8")
+        content = checkpoint.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeError) as exc:
         return None, f"cannot read checkpoint: {exc}"
     if not content.strip():
         return None, "checkpoint is empty"
     if len(content) > MAX_CHECKPOINT_CHARS:
         return None, f"checkpoint exceeds {MAX_CHECKPOINT_CHARS} characters"
+    estimated_tokens = estimate_tokens(content)
+    if estimated_tokens > MAX_WARM_ESTIMATED_TOKENS:
+        return None, f"checkpoint exceeds {MAX_WARM_ESTIMATED_TOKENS} estimated tokens"
+    recorded_tokens = state.get("warm_estimated_tokens", 0)
+    if recorded_tokens not in (0, estimated_tokens):
+        return None, "checkpoint token estimate does not match sealed state"
     if state.get("checkpoint_chars") != len(content):
         return None, "checkpoint length does not match sealed state"
     if state.get("checkpoint_hash") != digest(content):
@@ -324,9 +391,74 @@ def _checkpoint_content(
     return content, None
 
 
+def hot_content(
+    session_dir: Path,
+    state: dict[str, Any] | None = None,
+    *,
+    require_safe: bool = True,
+) -> tuple[str | None, str | None]:
+    """Read and verify the small hot capsule, if one was sealed."""
+
+    state = state or read_state(session_dir)
+    if state is None:
+        return None, "missing or invalid state.json"
+    state_error = validate_state(state)
+    if state_error:
+        return None, state_error
+    if require_safe and state.get("status") != "safe":
+        return None, "hot state is not sealed"
+    path = hot_path(session_dir)
+    try:
+        content = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        return None, f"cannot read hot state: {exc}"
+    if not content.strip():
+        return None, "hot state is empty"
+    if len(content) > MAX_HOT_CHARS:
+        return None, f"hot state exceeds {MAX_HOT_CHARS} characters"
+    estimated_tokens = estimate_tokens(content)
+    if estimated_tokens > MAX_HOT_ESTIMATED_TOKENS:
+        return None, f"hot state exceeds {MAX_HOT_ESTIMATED_TOKENS} estimated tokens"
+    if has_secret(content):
+        return None, "hot state looks like it contains a secret"
+    if state.get("hot_hash") != digest(content):
+        return None, "hot state hash does not match sealed state"
+    if state.get("hot_chars") != len(content):
+        return None, "hot state length does not match sealed state"
+    if state.get("hot_estimated_tokens") != estimated_tokens:
+        return None, "hot state token estimate does not match sealed state"
+    return content, None
+
+
 def identity_for(cwd: str | Path | None) -> tuple[str, str]:
     root = workspace_root(cwd)
     return digest(str(root)) or "", root.name or str(root)
+
+
+def _normalize_wave3_state(state: dict[str, Any]) -> bool:
+    """Add Wave 3 fields to Wave 1/2 state without invalidating old sessions."""
+
+    defaults: dict[str, Any] = {
+        "last_dirty_reason": None,
+        "last_tool_category": None,
+        "last_tool_use_hash": None,
+        "last_tool_input_hash": None,
+        "hot_hash": None,
+        "hot_chars": 0,
+        "hot_estimated_tokens": 0,
+        "warm_estimated_tokens": 0,
+        "active_subagents": [],
+        "last_subagent_id_hash": None,
+        "last_subagent_type": None,
+        "last_subagent_status": None,
+        "last_subagent_message_hash": None,
+    }
+    changed = False
+    for key, value in defaults.items():
+        if key not in state:
+            state[key] = list(value) if isinstance(value, list) else value
+            changed = True
+    return changed
 
 
 def ensure_session(
@@ -377,9 +509,17 @@ def ensure_session(
             "last_source": source,
             "last_sealed_at": None,
             "dirty_generation": 0,
+            "last_dirty_reason": None,
+            "last_tool_category": None,
+            "last_tool_use_hash": None,
+            "last_tool_input_hash": None,
             "origin_status": None,
             "last_tool_name": None,
             "transcript_path": None,
+            "hot_hash": None,
+            "hot_chars": 0,
+            "hot_estimated_tokens": 0,
+            "warm_estimated_tokens": 0,
             "emergency_manifest_hash": None,
             "emergency_manifest_chars": 0,
             "emergency_manifest_estimated_tokens": 0,
@@ -388,6 +528,11 @@ def ensure_session(
             "last_compact_started_at": None,
             "last_compact_completed_at": None,
             "last_compact_result": None,
+            "active_subagents": [],
+            "last_subagent_id_hash": None,
+            "last_subagent_type": None,
+            "last_subagent_status": None,
+            "last_subagent_message_hash": None,
         }
         try:
             write_state(state_path(session_dir), state)
@@ -399,12 +544,15 @@ def ensure_session(
         return session_dir, state, "session identity mismatch"
     if state.get("workspace_hash") != workspace_hash:
         return session_dir, state, "workspace identity mismatch"
+    state_changed = _normalize_wave3_state(state)
     state_error = validate_state(state)
     if state_error:
         return session_dir, state, f"invalid state.json: {state_error}"
 
     if source is not None and state.get("last_source") != source:
         state["last_source"] = source
+        state_changed = True
+    if state_changed:
         try:
             write_state(state_path(session_dir), state)
         except OSError as exc:
@@ -443,13 +591,305 @@ def mark_turn_dirty(
     if state.get("status") == "safe":
         safe_checkpoint_missing = checkpoint_content(session_dir, state)[0] is None
     if state.get("last_sealed_turn_hash") != turn_hash or safe_checkpoint_missing:
+        was_same_dirty_turn = (
+            state.get("status") == "dirty"
+            and state.get("pending_turn_hash") == turn_hash
+        )
         state["status"] = "dirty"
         state["pending_turn_hash"] = turn_hash
+        state["last_dirty_reason"] = "turn"
+        if not was_same_dirty_turn:
+            state["dirty_generation"] = int(state.get("dirty_generation", 0)) + 1
         try:
             write_state(state_path(session_dir), state)
         except OSError as exc:
             return session_dir, state, f"cannot update state.json: {exc}"
     return session_dir, state, None
+
+
+def _tool_input_digest(tool_input: Any) -> str | None:
+    """Hash tool arguments without persisting their potentially sensitive body."""
+
+    if tool_input is None:
+        return None
+    try:
+        serialized = json.dumps(tool_input, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        serialized = str(tool_input)
+    return digest(serialized)
+
+
+def _safe_tool_name(tool_name: Any) -> str:
+    value = sanitize_pointer(tool_name, MAX_TOOL_NAME_CHARS, always_hash=False)
+    return value or "unknown"
+
+
+def _persist_tool_event(
+    session_dir: Path,
+    *,
+    tool_name: str,
+    category: str,
+    marks_dirty: bool,
+    state: dict[str, Any],
+    turn_id: str | None,
+    tool_use_id: str | None,
+) -> str | None:
+    return append_event(
+        session_dir,
+        {
+            "event": "PreToolUse",
+            "tool_name": tool_name,
+            "category": category,
+            "marks_dirty": marks_dirty,
+            "status": state.get("status"),
+            "dirty_generation": state.get("dirty_generation", 0),
+            "turn_hash": digest(turn_id),
+            "tool_use_hash": digest(tool_use_id),
+        },
+    )
+
+
+def record_tool_use(
+    session_id: str | None,
+    cwd: str | Path | None,
+    turn_id: str | None,
+    tool_name: str | None,
+    category: str,
+    *,
+    tool_use_id: str | None = None,
+    tool_input: Any = None,
+) -> tuple[Path | None, dict[str, Any] | None, str | None]:
+    """Record a PreToolUse observation and conservatively mark the root dirty."""
+
+    session_dir, state, error = ensure_session(session_id, cwd, source="pretooluse")
+    if error or session_dir is None or state is None:
+        return session_dir, state, error
+    if not isinstance(turn_id, str) or not turn_id:
+        return session_dir, state, "missing turn_id"
+    if category not in TOOL_CATEGORIES:
+        return session_dir, state, "invalid tool category"
+
+    normalized_name = _safe_tool_name(tool_name)
+    turn_hash = digest(turn_id)
+    operation_name = re.split(r"(?:__|[.:/\\])", normalized_name.lower())[-1]
+    marks_dirty = not (category == "state" and operation_name == "inspect")
+    state_changed = False
+
+    # A PreToolUse callback can race a compact callback. Preserve the compact
+    # recovery obligation, but do not manufacture a new dirty turn for a
+    # safe-origin compact before SessionStart(source=compact) arrives.
+    if marks_dirty and not (state.get("status") == "compacting" and state.get("origin_status") == "safe"):
+        if state.get("status") not in ("compacting", "recovery_required", "compact_failed"):
+            if state.get("status") != "dirty" or state.get("pending_turn_hash") != turn_hash:
+                state["status"] = "dirty"
+                state["pending_turn_hash"] = turn_hash
+                state["dirty_generation"] = int(state.get("dirty_generation", 0)) + 1
+                state_changed = True
+        elif state.get("pending_turn_hash") is None:
+            state["pending_turn_hash"] = turn_hash
+            state_changed = True
+
+        state["last_dirty_reason"] = f"tool:{normalized_name}"
+        state_changed = True
+
+    state["last_tool_name"] = normalized_name
+    state["last_tool_category"] = category
+    state["last_tool_use_hash"] = digest(tool_use_id)
+    state["last_tool_input_hash"] = _tool_input_digest(tool_input)
+    state_changed = True
+    if state_changed:
+        try:
+            write_state(state_path(session_dir), state)
+        except OSError as exc:
+            return session_dir, state, f"cannot record tool state: {exc}"
+    event_error = _persist_tool_event(
+        session_dir,
+        tool_name=normalized_name,
+        category=category,
+        marks_dirty=marks_dirty,
+        state=state,
+        turn_id=turn_id,
+        tool_use_id=tool_use_id,
+    )
+    if event_error:
+        return session_dir, state, f"tool state recorded but event evidence failed: {event_error}"
+    return session_dir, state, None
+
+
+def _safe_agent_type(agent_type: Any) -> str:
+    value = sanitize_pointer(agent_type, 160, always_hash=False)
+    return value or "unknown"
+
+
+def _active_subagent_index(state: dict[str, Any], agent_hash: str) -> int | None:
+    for index, item in enumerate(state.get("active_subagents", [])):
+        if isinstance(item, dict) and item.get("agent_id_hash") == agent_hash:
+            return index
+    return None
+
+
+def _record_subagent_event(
+    session_dir: Path,
+    *,
+    event: str,
+    state: dict[str, Any],
+    turn_id: str | None,
+    agent_id: str | None,
+    agent_type: str,
+    message: str | None = None,
+) -> str | None:
+    return append_event(
+        session_dir,
+        {
+            "event": event,
+            "status": state.get("status"),
+            "dirty_generation": state.get("dirty_generation", 0),
+            "turn_hash": digest(turn_id),
+            "agent_id_hash": digest(agent_id),
+            "agent_type": agent_type,
+            "agent_message_hash": digest(message),
+            "agent_message_chars": len(message) if isinstance(message, str) else 0,
+            "active_subagent_count": len(state.get("active_subagents", [])),
+        },
+    )
+
+
+def mark_subagent_started(
+    session_id: str | None,
+    cwd: str | Path | None,
+    turn_id: str | None,
+    agent_id: str | None,
+    agent_type: str | None,
+) -> tuple[Path | None, dict[str, Any] | None, str | None]:
+    """Mark the root session dirty when a subagent starts."""
+
+    session_dir, state, error = ensure_session(session_id, cwd, source="subagent_start")
+    if error or session_dir is None or state is None:
+        return session_dir, state, error
+    if not isinstance(turn_id, str) or not turn_id:
+        return session_dir, state, "missing turn_id"
+    if not isinstance(agent_id, str) or not agent_id:
+        return session_dir, state, "missing agent_id"
+    agent_hash = digest(agent_id)
+    if agent_hash is None:
+        return session_dir, state, "missing agent_id"
+    active = state.setdefault("active_subagents", [])
+    existing_index = _active_subagent_index(state, agent_hash)
+    if existing_index is None:
+        if len(active) >= MAX_ACTIVE_SUBAGENTS:
+            return session_dir, state, f"active subagent limit {MAX_ACTIVE_SUBAGENTS} exceeded"
+        active.append(
+            {
+                "agent_id_hash": agent_hash,
+                "agent_type": _safe_agent_type(agent_type),
+                "status": "running",
+                "turn_hash": digest(turn_id),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    elif active[existing_index].get("status") == "unknown":
+        # A later start for the same id is the explicit lifecycle evidence
+        # needed to reconcile an earlier orphan stop. A duplicate stop alone
+        # must not clear the unknown entry.
+        active[existing_index].update(
+            {
+                "agent_type": _safe_agent_type(agent_type),
+                "status": "running",
+                "turn_hash": digest(turn_id),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    if state.get("status") not in ("compacting", "recovery_required", "compact_failed"):
+        if state.get("status") != "dirty" or state.get("pending_turn_hash") != digest(turn_id):
+            state["dirty_generation"] = int(state.get("dirty_generation", 0)) + 1
+        state["status"] = "dirty"
+        state["pending_turn_hash"] = digest(turn_id)
+    state["last_dirty_reason"] = "subagent:start"
+    state["last_subagent_id_hash"] = agent_hash
+    state["last_subagent_type"] = _safe_agent_type(agent_type)
+    state["last_subagent_status"] = "running"
+    try:
+        write_state(state_path(session_dir), state)
+    except OSError as exc:
+        return session_dir, state, f"cannot record subagent start: {exc}"
+    event_error = _record_subagent_event(
+        session_dir,
+        event="SubagentStart",
+        state=state,
+        turn_id=turn_id,
+        agent_id=agent_id,
+        agent_type=_safe_agent_type(agent_type),
+    )
+    return session_dir, state, f"subagent event evidence failed: {event_error}" if event_error else None
+
+
+def mark_subagent_stopped(
+    session_id: str | None,
+    cwd: str | Path | None,
+    turn_id: str | None,
+    agent_id: str | None,
+    agent_type: str | None,
+    last_assistant_message: str | None = None,
+) -> tuple[Path | None, dict[str, Any] | None, str | None]:
+    """Record a subagent stop; only the root agent can later seal the state."""
+
+    session_dir, state, error = ensure_session(session_id, cwd, source="subagent_stop")
+    if error or session_dir is None or state is None:
+        return session_dir, state, error
+    if not isinstance(turn_id, str) or not turn_id:
+        return session_dir, state, "missing turn_id"
+    if not isinstance(agent_id, str) or not agent_id:
+        return session_dir, state, "missing agent_id"
+    agent_hash = digest(agent_id)
+    if agent_hash is None:
+        return session_dir, state, "missing agent_id"
+    index = _active_subagent_index(state, agent_hash)
+    if index is not None and state["active_subagents"][index].get("status") == "running":
+        state["active_subagents"].pop(index)
+        stop_status = "completed"
+    elif index is not None:
+        # Repeated orphan stops remain unknown until a matching start/stop
+        # sequence explicitly re-establishes the child lifecycle.
+        stop_status = "unknown"
+    else:
+        # An orphan/foreign stop is evidence of an unknown lifecycle; do not
+        # turn it into a false safe state. Keep a bounded unknown entry so a
+        # later, unrelated child completion cannot overwrite this warning.
+        stop_status = "unknown"
+        if len(state["active_subagents"]) >= MAX_ACTIVE_SUBAGENTS:
+            return session_dir, state, f"active subagent limit {MAX_ACTIVE_SUBAGENTS} exceeded while recording unknown stop"
+        state["active_subagents"].append(
+            {
+                "agent_id_hash": agent_hash,
+                "agent_type": _safe_agent_type(agent_type),
+                "status": "unknown",
+                "turn_hash": digest(turn_id),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        state["last_dirty_reason"] = "subagent:unknown_stop"
+    if state.get("status") not in ("compacting", "recovery_required", "compact_failed"):
+        state["status"] = "dirty"
+        state["pending_turn_hash"] = state.get("pending_turn_hash") or digest(turn_id)
+    state["last_dirty_reason"] = state.get("last_dirty_reason") or "subagent:stop"
+    state["last_subagent_id_hash"] = agent_hash
+    state["last_subagent_type"] = _safe_agent_type(agent_type)
+    state["last_subagent_status"] = stop_status
+    state["last_subagent_message_hash"] = digest(last_assistant_message)
+    try:
+        write_state(state_path(session_dir), state)
+    except OSError as exc:
+        return session_dir, state, f"cannot record subagent stop: {exc}"
+    event_error = _record_subagent_event(
+        session_dir,
+        event="SubagentStop",
+        state=state,
+        turn_id=turn_id,
+        agent_id=agent_id,
+        agent_type=_safe_agent_type(agent_type),
+        message=last_assistant_message,
+    )
+    return session_dir, state, f"subagent event evidence failed: {event_error}" if event_error else None
 
 
 def has_secret(text: str) -> bool:
@@ -529,7 +969,7 @@ def emergency_manifest_content(
     """Build a bounded mechanical capsule; semantic summaries belong in checkpoint.md."""
 
     def _pointer(value: Any, limit: int, *, force_digest: bool = False) -> str:
-        text = str(value or "unknown").replace("\r", " ").replace("\n", " ").replace("\x00", " ")
+        text = str("unknown" if value is None else value).replace("\r", " ").replace("\n", " ").replace("\x00", " ")
         if force_digest:
             return f"redacted:{digest(text)}"
         return sanitize_pointer(text, limit) or "unknown"
@@ -542,6 +982,7 @@ def emergency_manifest_content(
             f"- Turn: {_pointer(digest(turn_id), 16)}",
             f"- Last safe checkpoint sequence: {_pointer(state.get('checkpoint_seq', 0), 16)}",
             f"- Dirty generation: {_pointer(state.get('dirty_generation', 0), 16)}",
+            f"- Active subagents: {_pointer(len(state.get('active_subagents', [])), 16)}",
             f"- Last tool: {_pointer(tool_name or state.get('last_tool_name'), 160, force_digest=compact_pointers)}",
             f"- Transcript pointer: {_pointer(transcript_path or state.get('transcript_path'), 300, force_digest=compact_pointers)}",
             f"- Workspace: {_pointer(workspace_name, 160, force_digest=compact_pointers)}",
@@ -551,7 +992,7 @@ def emergency_manifest_content(
         return "\n".join(lines) + "\n"
 
     content = _build(compact_pointers=False)
-    if estimate_tokens(content) > 250:
+    if estimate_tokens(content) > MAX_EMERGENCY_ESTIMATED_TOKENS:
         content = _build(compact_pointers=True)
     # This is a final character guard; the normal path remains well below the
     # limit, while unusual Unicode workspace names cannot expand indefinitely.
@@ -581,7 +1022,7 @@ def emergency_manifest_content_from_state(
         return None, "emergency manifest length does not match state"
     if state.get("emergency_manifest_hash") != digest(content):
         return None, "emergency manifest hash does not match state"
-    if estimate_tokens(content) > 250:
+    if estimate_tokens(content) > MAX_EMERGENCY_ESTIMATED_TOKENS:
         return None, "emergency manifest exceeds its estimated-token budget"
     return content, None
 
@@ -593,7 +1034,7 @@ def seal_checkpoint(
     turn_id: str | None = None,
     session_id: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Validate and atomically seal a Wave 1 checkpoint."""
+    """Validate and atomically seal the warm checkpoint and optional hot state."""
 
     state = read_state(session_dir)
     state_error = validate_state(state)
@@ -622,10 +1063,21 @@ def seal_checkpoint(
         return 3, {"status": "identity_mismatch", "reason": "workspace identity mismatch"}
     if state.get("status") == "compacting":
         return 2, {"status": "invalid", "reason": "cannot seal while compact is in progress"}
+    if state.get("active_subagents"):
+        return 2, {
+            "status": "invalid",
+            "reason": "cannot seal while a subagent is still running or has unknown status",
+            "active_subagents": len(state.get("active_subagents", [])),
+        }
+    if state.get("last_subagent_status") == "unknown":
+        return 2, {
+            "status": "invalid",
+            "reason": "cannot seal while a subagent lifecycle is unknown; reconcile the agent first",
+        }
 
     checkpoint = checkpoint_path(session_dir)
     try:
-        content = checkpoint.read_text(encoding="utf-8")
+        content = checkpoint.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeError) as exc:
         return 2, {"status": "invalid", "reason": f"cannot read checkpoint: {exc}"}
 
@@ -637,8 +1089,51 @@ def seal_checkpoint(
             "reason": f"checkpoint exceeds {MAX_CHECKPOINT_CHARS} characters",
             "checkpoint_chars": len(content),
         }
+    warm_estimated_tokens = estimate_tokens(content)
+    if warm_estimated_tokens > MAX_WARM_ESTIMATED_TOKENS:
+        return 2, {
+            "status": "invalid",
+            "reason": f"checkpoint exceeds {MAX_WARM_ESTIMATED_TOKENS} estimated tokens",
+            "warm_estimated_tokens": warm_estimated_tokens,
+        }
     if has_secret(content):
         return 2, {"status": "invalid", "reason": "checkpoint looks like it contains a secret"}
+
+    # A hot capsule is optional for Wave 1/2 compatibility. If the warm
+    # checkpoint is already small enough, mirror it into hot.md so old users
+    # automatically gain bounded hot recovery without a second model write.
+    hot = hot_path(session_dir)
+    hot_content_value: str | None = None
+    hot_needs_write = False
+    if hot.exists():
+        try:
+            hot_content_value = hot.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError) as exc:
+            return 2, {"status": "invalid", "reason": f"cannot read hot state: {exc}"}
+        if not hot_content_value.strip():
+            return 2, {"status": "invalid", "reason": "hot state is empty"}
+        if len(hot_content_value) > MAX_HOT_CHARS:
+            return 2, {
+                "status": "invalid",
+                "reason": f"hot state exceeds {MAX_HOT_CHARS} characters",
+                "hot_chars": len(hot_content_value),
+            }
+        hot_estimated_tokens = estimate_tokens(hot_content_value)
+        if hot_estimated_tokens > MAX_HOT_ESTIMATED_TOKENS:
+            return 2, {
+                "status": "invalid",
+                "reason": f"hot state exceeds {MAX_HOT_ESTIMATED_TOKENS} estimated tokens",
+                "hot_estimated_tokens": hot_estimated_tokens,
+            }
+        if has_secret(hot_content_value):
+            return 2, {"status": "invalid", "reason": "hot state looks like it contains a secret"}
+    elif warm_estimated_tokens <= MAX_HOT_ESTIMATED_TOKENS:
+        hot_content_value = content
+        hot_needs_write = True
+
+    hot_hash = digest(hot_content_value)
+    hot_chars = len(hot_content_value) if hot_content_value is not None else 0
+    hot_estimated_tokens = estimate_tokens(hot_content_value) if hot_content_value is not None else 0
 
     checkpoint_hash = digest(content)
     pending_turn_hash = state.get("pending_turn_hash")
@@ -658,19 +1153,33 @@ def seal_checkpoint(
     if sealed_turn_hash is None:
         return 2, {"status": "invalid", "reason": "no pending turn to seal"}
 
+    if hot_needs_write:
+        try:
+            _atomic_write_text(hot, hot_content_value or "")
+        except OSError as exc:
+            return 4, {"status": "error", "reason": f"cannot write hot state: {exc}"}
+
     same_checkpoint = (
         state.get("status") == "safe"
         and state.get("checkpoint_hash") == checkpoint_hash
         and state.get("last_sealed_turn_hash") == sealed_turn_hash
+        and state.get("warm_estimated_tokens", 0) == warm_estimated_tokens
+        and state.get("hot_hash") == hot_hash
+        and state.get("hot_chars", 0) == hot_chars
+        and state.get("hot_estimated_tokens", 0) == hot_estimated_tokens
     )
     if same_checkpoint:
         return 0, {
             "status": "safe",
             "checkpoint_seq": state.get("checkpoint_seq", 0),
             "checkpoint_chars": len(content),
+            "hot_estimated_tokens": hot_estimated_tokens,
+            "warm_estimated_tokens": warm_estimated_tokens,
+            "content_digest": digest(f"{hot_hash or ''}:{checkpoint_hash or ''}"),
             "idempotent": True,
         }
 
+    was_recovery = state.get("status") == "recovery_required"
     state.update(
         {
             "status": "safe",
@@ -681,18 +1190,37 @@ def seal_checkpoint(
             "pending_turn_hash": None,
             "last_sealed_at": datetime.now(timezone.utc).isoformat(),
             "origin_status": None,
-            "last_compact_result": "sealed_after_recovery"
-            if state.get("status") == "recovery_required"
-            else state.get("last_compact_result"),
+            "last_compact_result": "sealed_after_recovery" if was_recovery else state.get("last_compact_result"),
+            "warm_estimated_tokens": warm_estimated_tokens,
+            "hot_hash": hot_hash,
+            "hot_chars": hot_chars,
+            "hot_estimated_tokens": hot_estimated_tokens,
         }
     )
     try:
         write_state(state_path(session_dir), state)
     except OSError as exc:
         return 4, {"status": "error", "reason": f"cannot write state.json: {exc}"}
-    return 0, {
+    event_error = append_event(
+        session_dir,
+        {
+            "event": "Seal",
+            "status": "safe",
+            "checkpoint_seq": state["checkpoint_seq"],
+            "hot_estimated_tokens": hot_estimated_tokens,
+            "warm_estimated_tokens": warm_estimated_tokens,
+            "content_digest": digest(f"{hot_hash or ''}:{checkpoint_hash or ''}"),
+        },
+    )
+    result: dict[str, Any] = {
         "status": "safe",
         "checkpoint_seq": state["checkpoint_seq"],
         "checkpoint_chars": len(content),
+        "hot_estimated_tokens": hot_estimated_tokens,
+        "warm_estimated_tokens": warm_estimated_tokens,
+        "content_digest": digest(f"{hot_hash or ''}:{checkpoint_hash or ''}"),
         "idempotent": False,
     }
+    if event_error:
+        result["warning"] = f"seal state saved but event evidence failed: {event_error}"
+    return 0, result

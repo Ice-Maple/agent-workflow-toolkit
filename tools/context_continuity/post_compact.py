@@ -17,7 +17,8 @@ else:  # Allow the exact file path used by hooks.example.json.
 
 def _payload() -> dict[str, Any]:
     try:
-        value = json.loads(sys.stdin.read() or "{}")
+        raw = sys.stdin.read() or "{}"
+        value = json.loads(raw.lstrip("\ufeff"))
     except (json.JSONDecodeError, UnicodeError):
         return {}
     return value if isinstance(value, dict) else {}

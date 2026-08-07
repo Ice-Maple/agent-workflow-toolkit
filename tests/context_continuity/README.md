@@ -89,6 +89,27 @@ Use the fixture only with a private `CODEX_CONTEXT_CONTINUITY_HOME` and an
 isolated Codex App configuration; do not install it into the active user hook
 layer before host smoke evidence is captured.
 
+## Wave 3 mechanical hardening smoke
+
+Wave 3 adds `fixtures/wave3/hooks.example.json`. It keeps the Wave 2
+non-blocking compact path and adds:
+
+- `PreToolUse` classification and dirty tracking; write, read/evidence, and
+  unknown tools are recorded before they run, while only `inspect` is treated
+  as a non-dirty state lookup;
+- bounded `hot.md` (at most 600 estimated tokens) and warm `checkpoint.md` (at
+  most 1,500 estimated tokens) validation at seal time;
+- `SubagentStart`/`SubagentStop` records attached to the root session. A root
+  checkpoint cannot be sealed while a child is still running or has an unknown
+  lifecycle.
+
+The Wave 3 hook output is fail-open: these hooks record state but do not return
+unsupported `continue:false` or blocking decisions for tool calls and
+subagent lifecycle events. Tool arguments and subagent messages are persisted
+as hashes/lengths only. Use a private `CODEX_CONTEXT_CONTINUITY_HOME`, replace
+`<REPO_ROOT>` in the fixture, review/trust the exact hooks, and save W3 evidence
+under `tests/context_continuity/evidence/<date>/W3-*`.
+
 ## Evidence requirements
 
 At minimum capture:

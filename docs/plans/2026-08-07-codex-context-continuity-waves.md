@@ -1,7 +1,7 @@
 # Codex 上下文连续性实现 Wave 计划
 
 - 日期：2026-08-07
-- 状态：执行中（Wave 0 探针、Wave 1 连续性 MVP 与 Wave 2 非阻止恢复骨架已实现；宿主 App smoke 待执行）
+- 状态：执行中（Wave 0 探针、Wave 1 连续性 MVP、Wave 2 非阻止恢复骨架与 Wave 3 机械硬化已实现；宿主 App smoke 待执行）
 - 设计基线：`docs/brainstorms/2026-08-07-codex-context-continuity.md`
 - 评审处理：`docs/reviews/2026-08-07-codex-context-continuity-review-closure.md`
 
@@ -231,6 +231,6 @@ W0 探针
 
 ## 当前决策点
 
-建议先采用 **Wave 0 → Wave 1 → Wave 2** 作为第一阶段交付，暂不实现 Wave 3/4。这样保留在线建议的“先做 80% 价值”原则，同时不把你最关心的 mid-turn 自动压缩完全推迟到未来。
+Wave 0 → Wave 1 → Wave 2 已构成可初步使用的连续性路径，Wave 3 的机械硬化也已在脚本级实现并通过本地回归与 CLI smoke。当前仍不把 Wave 3 说成真实 Codex App 宿主已验证：需要在隔离配置中观察真实的 `PreToolUse`、`Subagent*`、`PreCompact`、`PostCompact` 和 `SessionStart(source=compact)` 顺序。
 
-下一步应是为 Wave 0 制定最小验证清单；验证通过后再进入 Wave 1 实现。
+Wave 4（统计评测和可选精确调度）继续延期，只有真实使用数据表明中途压缩仍频繁造成重复执行时再启动。

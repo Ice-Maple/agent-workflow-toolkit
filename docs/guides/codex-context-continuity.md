@@ -25,10 +25,10 @@ Wave 是开发阶段，不是需要用户切换的四种模式。
 | Wave 0 | 只观察 Codex App 什么时候发送生命周期事件，不改变任务行为。 | 已完成，主要用于宿主验证 |
 | Wave 1 | 每轮结束时保存一份 checkpoint，下一轮或压缩后恢复。 | 已完成 |
 | Wave 2 | 处理中途压缩：保存紧急便签，压缩后要求核对并恢复。 | 已完成，当前初步可用版本 |
-| Wave 3 | 让工具调用自动标记“工作是否变脏”，并增加更严格的预算检查。 | 计划中 |
+| Wave 3 | 让工具调用和子 Agent 自动标记“工作是否变脏”，并限制恢复信息的大小。 | 已完成脚本级实现，真实 App smoke 待验证 |
 | Wave 4 | 用真实任务统计效果；只有确实需要时，才考虑精确安排压缩时机。 | 计划中 |
 
-日常使用主要涉及 Wave 2。Wave 0 不需要一直开启，Wave 3 和 Wave 4 也不是当前使用前提。
+日常使用至少需要 Wave 2；如果希望工具调用和子 Agent 也自动参与状态判断，可以改用 Wave 3 Fixture。Wave 0 不需要一直开启，Wave 4 仍是计划中的评测与调度阶段。
 
 ## 当前版本能做什么
 
@@ -49,6 +49,15 @@ Wave 是开发阶段，不是需要用户切换的四种模式。
 
 这样做的原因是：阻止 context-limit 压缩可能直接中止当前 turn，所以本版本选择“允许压缩，但保留恢复线索”。
 
+### Wave 3 会多做什么
+
+Wave 3 不改变上面的“允许压缩”策略，只把几个容易依赖模型自觉的地方变成机械记录：
+
+- `PreToolUse` 在工具真正执行前记录工具名和类别；写入工具、只读证据工具和未知工具都会让状态保持 `dirty`，只有 `inspect` 这种状态查询不改变状态；
+- `SubagentStart`/`SubagentStop` 记录子 Agent 是否仍在运行。根 Agent 不能因为子 Agent 返回了结果就自动变成 `safe`，必须先核对结果、更新 checkpoint 并 seal；
+- seal 时分别检查小的 `hot.md` 和较完整的 `checkpoint.md`，超出预算就报可修复错误，不静默截断；
+- 压缩后优先注入 hot 状态；较大的 warm checkpoint 只保留磁盘路径，避免恢复内容本身再次挤满上下文。
+
 ## 如何初步使用
 
 建议先在临时 workspace 中验证，不要立即写入全局 `~/.codex/hooks.json`。
@@ -62,7 +71,7 @@ cd E:\projects\agent-workflow-toolkit
 python -m unittest discover -s tests/context_continuity -p "test_*.py"
 ```
 
-当前仓库还提供了本地 CLI smoke 证据：[W2-local-cli-smoke.md](../../tests/context_continuity/evidence/2026-08-07/W2-local-cli-smoke.md)。
+当前仓库还提供了本地 CLI smoke 证据：[W2-local-cli-smoke.md](../../tests/context_continuity/evidence/2026-08-07/W2-local-cli-smoke.md) 和 [W3-local-cli-smoke.md](../../tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md)。两者都是脚本级证据，不等同于真实 Codex App 宿主验证。
 
 ### 2. 创建隔离的 Hook 配置
 
@@ -76,7 +85,7 @@ $codexDir = Join-Path $smokeRoot ".codex"
 New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
 
 $template = Get-Content -Raw `
-  "$repo\tests\context_continuity\fixtures\wave2\hooks.example.json"
+  "$repo\tests\context_continuity\fixtures\wave3\hooks.example.json"
 $template.Replace("<REPO_ROOT>", $repo) |
   Set-Content -LiteralPath (Join-Path $codexDir "hooks.json") -Encoding utf8
 
@@ -95,6 +104,8 @@ $env:CODEX_CONTEXT_CONTINUITY_HOME = Join-Path $smokeRoot "state"
 3. 手动 compact 后，下一次请求是否看到原来的目标和下一步；
 4. dirty 状态下 compact 后，是否先提示 `recovery_required`，而不是直接重复执行；
 5. `%TEMP%\codex-context-continuity-app-smoke\state` 下是否出现 `state.json`、`events.jsonl` 和必要时的 `emergency.md`。
+
+如果只想先验证 Wave 2，可以把上面的 `wave3` 改成 `wave2`。Wave 3 还应额外观察 `PreToolUse`、`SubagentStart` 和 `SubagentStop` 事件，以及 `hot.md` 是否保持很小。
 
 不需要故意把大量 token 填满上下文。先用手动 compact 验证生命周期；需要测试 auto compact 时，再在隔离配置中设置一个临时、偏保守的自动压缩阈值。
 
@@ -116,9 +127,9 @@ checkpoint 的目的不是保存聊天记录，而是让下一次 Agent 能准�
 - 已经可以从仓库重新读取的日志；
 - 密码、Token、认证头或其他凭据。
 
-当前 checkpoint 有字符上限。seal 失败时会保留 dirty 状态，模型需要把内容改得更短后再 seal。
+当前 checkpoint 有字符和估算 token 上限。seal 失败时会保留 dirty 状态，模型需要把内容改得更短后再 seal。
 
-当前实现的上限是：checkpoint 不超过 2400 个字符；紧急便签不超过 1200 个字符，并且按保守估算不超过约 250 个 token。
+当前实现的上限是：warm `checkpoint.md` 不超过 2400 个字符、约 1500 个估算 token；hot `hot.md` 不超过 2400 个字符、600 个估算 token；紧急便签不超过 1200 个字符、约 250 个估算 token。小 checkpoint 在 seal 时会自动生成 hot 状态；较大的 warm 状态不会被硬截断。
 
 ## 这些状态是什么意思
 
@@ -143,6 +154,14 @@ Wave 2 Fixture 配置了四类 Hook：
 
 配置模板是 [wave2/hooks.example.json](../../tests/context_continuity/fixtures/wave2/hooks.example.json)。模板中的 `<REPO_ROOT>` 必须替换为仓库绝对路径。
 
+Wave 3 Fixture 在此基础上增加：
+
+- `PreToolUse`：记录工具类别和 dirty 状态；
+- `SubagentStart`/`SubagentStop`：记录根 session 下的子 Agent 生命周期；
+- `SessionStart` 的 `additionalContextLimit=800`：给 hot 状态和固定恢复提示留出空间。
+
+配置模板是 [wave3/hooks.example.json](../../tests/context_continuity/fixtures/wave3/hooks.example.json)。Hook 只记录机械状态，不返回工具调用的阻止决定，也不会自动替根 Agent seal。
+
 ### `CODEX_CONTEXT_CONTINUITY_HOME`
 
 这个环境变量指定状态目录。建议始终设置到用户私有目录或临时目录，例如：
@@ -155,6 +174,7 @@ Wave 2 Fixture 配置了四类 Hook：
 
 ```text
 state.json                 机械状态和校验信息
+hot.md                    压缩后优先注入的小状态
 checkpoint.md              精简的语义进度
 emergency.md               中途压缩时的机械便签
 compact-marker.json        状态写入失败时的恢复标记
@@ -163,7 +183,7 @@ events.jsonl               不含提示词正文的生命周期记录
 
 ### `additionalContextLimit`
 
-Wave 2 的 SessionStart Fixture 使用 `1200` 作为额外上下文上限，为 checkpoint、紧急便签和固定恢复提示预留空间。这个值只在 Hook 配置中生效，不会修改模型的上下文窗口。
+Wave 2 的 SessionStart Fixture 使用 `1200`；Wave 3 使用 `800`，因为 Wave 3 只允许把不超过 600 个估算 token 的 hot 状态直接注入，再加上固定恢复提示。这个值只在 Hook 配置中生效，不会修改模型的上下文窗口。
 
 ### 自动压缩阈值
 
@@ -237,12 +257,15 @@ Remove-Item Env:CODEX_CONTEXT_CONTINUITY_HOME -ErrorAction SilentlyContinue
 - 精确 token 调度；
 - 自动捕获所有工具调用产生的新事实；
 - 真实 Codex App 在所有版本中的事件顺序完全一致。
+- 只在任务结束时自动压缩，或精确安排压缩时机。
 
-真实宿主 smoke 通过后，再考虑是否扩大启用范围或进入 Wave 3。
+Wave 3 的本地脚本 smoke 已通过，但真实宿主 smoke 仍需单独验证；在此之前建议只在隔离 workspace 中启用。
 
 ## 相关实现和验证材料
 
 - [Wave 计划](../plans/2026-08-07-codex-context-continuity-waves.md)
 - [设计说明](../brainstorms/2026-08-07-codex-context-continuity.md)
 - [Wave 2 Hook Fixture](../../tests/context_continuity/fixtures/wave2/hooks.example.json)
+- [Wave 3 Hook Fixture](../../tests/context_continuity/fixtures/wave3/hooks.example.json)
 - [本地 CLI smoke 证据](../../tests/context_continuity/evidence/2026-08-07/W2-local-cli-smoke.md)
+- [Wave 3 本地 CLI smoke 证据](../../tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md)

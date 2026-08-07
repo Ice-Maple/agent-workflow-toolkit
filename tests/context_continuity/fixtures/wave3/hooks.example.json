@@ -1,0 +1,103 @@
+{
+  "description": "Wave 3 mechanical dirty tracking, bounded hot/warm recovery, and subagent lifecycle hooks. Replace <REPO_ROOT> before use.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/session_start.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\session_start.py\"",
+            "additionalContextLimit": 800,
+            "timeout": 10,
+            "statusMessage": "Loading bounded context continuity state"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/pre_tool_use.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\pre_tool_use.py\"",
+            "timeout": 10,
+            "statusMessage": "Recording context continuity tool state"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/pre_compact.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\pre_compact.py\"",
+            "timeout": 10,
+            "statusMessage": "Saving bounded context continuity recovery manifest"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/post_compact.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\post_compact.py\"",
+            "timeout": 10,
+            "statusMessage": "Recording context continuity compact completion"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/subagent_start.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\subagent_start.py\"",
+            "timeout": 10,
+            "statusMessage": "Recording subagent start for context continuity"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/subagent_stop.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\subagent_stop.py\"",
+            "timeout": 10,
+            "statusMessage": "Recording subagent completion for context continuity"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/stop.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\stop.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking bounded context continuity checkpoint"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -14,6 +14,8 @@ if __package__:
         checkpoint_path,
         emergency_manifest_content_from_state,
         ensure_session,
+        estimate_tokens,
+        hot_content,
         clear_compact_marker,
         read_compact_marker,
         write_state,
@@ -26,6 +28,8 @@ else:  # Allow the exact file path used by hooks.example.json.
         checkpoint_path,
         emergency_manifest_content_from_state,
         ensure_session,
+        estimate_tokens,
+        hot_content,
         clear_compact_marker,
         read_compact_marker,
         write_state,
@@ -34,7 +38,8 @@ else:  # Allow the exact file path used by hooks.example.json.
 
 def _payload() -> dict[str, Any]:
     try:
-        value = json.loads(sys.stdin.read() or "{}")
+        raw = sys.stdin.read() or "{}"
+        value = json.loads(raw.lstrip("\ufeff"))
     except (json.JSONDecodeError, UnicodeError):
         return {}
     return value if isinstance(value, dict) else {}
@@ -79,6 +84,27 @@ def _startup_summary(content: str) -> str:
         if len(selected) >= 3:
             break
     return " ".join(selected)[:500]
+
+
+def _hot_or_bounded_warm(
+    session_dir: Path,
+    state: dict[str, Any],
+    *,
+    require_safe: bool,
+) -> tuple[str | None, str | None, str | None]:
+    """Prefer hot content and never inject an oversized warm checkpoint."""
+
+    warm, warm_error = checkpoint_content(session_dir, state, require_safe=require_safe)
+    # Hot and warm are a pair. Never inject a stale hot capsule when the
+    # sealed warm checkpoint has been tampered with or cannot be read.
+    if warm is None:
+        return None, None, warm_error
+    hot, hot_error = hot_content(session_dir, state, require_safe=require_safe)
+    if hot is not None:
+        return hot, "hot", None
+    if warm is not None and estimate_tokens(warm) <= 600:
+        return warm, "warm-fallback", hot_error or warm_error
+    return None, None, hot_error or warm_error
 
 
 def main() -> int:
@@ -223,6 +249,7 @@ def main() -> int:
     lines = [
         "Context continuity is active.",
         f"Session state directory: {session_dir}",
+        f"Hot state file: {session_dir / 'hot.md'}",
         f"Checkpoint file: {checkpoint}",
         f"Seal command: {_seal_command(session_dir, session_id=payload.get('session_id', ''), cwd=payload.get('cwd'))}",
     ]
@@ -231,16 +258,20 @@ def main() -> int:
 
     recovery = state.get("status") == "recovery_required"
     if recovery:
-        content, checkpoint_error = checkpoint_content(session_dir, state, require_safe=False)
+        content, content_kind, checkpoint_error = _hot_or_bounded_warm(
+            session_dir,
+            state,
+            require_safe=False,
+        )
         manifest, manifest_error = emergency_manifest_content_from_state(session_dir, state)
         lines.append("Recovery is required: verify the workspace and artifacts before resuming work.")
         if content is not None:
             lines.extend(
                 [
-                    "Last safe checkpoint (verify before relying on it):",
-                    "--- checkpoint.md ---",
+                    f"Last safe {content_kind} state (verify before relying on it):",
+                    f"--- {('hot.md' if content_kind == 'hot' else 'checkpoint.md')} ---",
                     content.rstrip(),
-                    "--- end checkpoint.md ---",
+                    f"--- end {('hot.md' if content_kind == 'hot' else 'checkpoint.md')} ---",
                 ]
             )
         elif checkpoint_error:
@@ -251,29 +282,37 @@ def main() -> int:
             lines.append(f"Emergency manifest was not injected: {manifest_error}.")
         lines.append("Reconcile evidence, then write checkpoint.md and run seal before continuing substantive work.")
     elif state.get("status") == "compact_failed":
-        content, checkpoint_error = checkpoint_content(session_dir, state, require_safe=False)
+        content, content_kind, checkpoint_error = _hot_or_bounded_warm(
+            session_dir,
+            state,
+            require_safe=False,
+        )
         lines.append("Compact completion is unverified; preserve the last safe checkpoint and inspect evidence before continuing.")
         if content is not None:
             lines.extend(
                 [
-                    "Last safe checkpoint (verify before relying on it):",
-                    "--- checkpoint.md ---",
+                    f"Last safe {content_kind} state (verify before relying on it):",
+                    f"--- {('hot.md' if content_kind == 'hot' else 'checkpoint.md')} ---",
                     content.rstrip(),
-                    "--- end checkpoint.md ---",
+                    f"--- end {('hot.md' if content_kind == 'hot' else 'checkpoint.md')} ---",
                 ]
             )
         elif checkpoint_error:
             lines.append(f"Last safe checkpoint was not injected: {checkpoint_error}.")
     else:
-        content, checkpoint_error = checkpoint_content(session_dir, state)
+        content, content_kind, checkpoint_error = _hot_or_bounded_warm(
+            session_dir,
+            state,
+            require_safe=True,
+        )
         if content is not None:
             if source == "compact":
                 lines.extend(
                     [
-                        "Verify this sealed checkpoint against the current workspace before continuing:",
-                        "--- checkpoint.md ---",
+                        f"Verify this sealed {content_kind} state against the current workspace before continuing:",
+                        f"--- {('hot.md' if content_kind == 'hot' else 'checkpoint.md')} ---",
                         content.rstrip(),
-                        "--- end checkpoint.md ---",
+                        f"--- end {('hot.md' if content_kind == 'hot' else 'checkpoint.md')} ---",
                         "Continue from the first incomplete step; do not repeat completed work without evidence.",
                     ]
                 )

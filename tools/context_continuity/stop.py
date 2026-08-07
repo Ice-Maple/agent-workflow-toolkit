@@ -16,7 +16,8 @@ else:  # Allow the exact file path used by hooks.example.json.
 
 def _payload() -> dict[str, Any]:
     try:
-        value = json.loads(sys.stdin.read() or "{}")
+        raw = sys.stdin.read() or "{}"
+        value = json.loads(raw.lstrip("\ufeff"))
     except (json.JSONDecodeError, UnicodeError):
         return {}
     return value if isinstance(value, dict) else {}
@@ -89,7 +90,8 @@ def main() -> int:
         {
             "decision": "block",
             "reason": (
-                "Write a concise checkpoint.md and seal it before ending this turn. "
+                "Write a concise checkpoint.md (and, for Wave 3, a hot.md capsule of at most 600 estimated tokens) "
+                "and seal it before ending this turn. "
                 "Do not repeat completed work. Run "
                 f"{seal_command}"
             ),

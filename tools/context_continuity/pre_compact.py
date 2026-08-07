@@ -16,6 +16,7 @@ if __package__:
         emergency_manifest_content,
         estimate_tokens,
         ensure_session,
+        MAX_EMERGENCY_ESTIMATED_TOKENS,
         mark_turn_dirty,
         write_compact_marker,
         sanitize_pointer,
@@ -31,6 +32,7 @@ else:  # Allow the exact file path used by hooks.example.json.
         emergency_manifest_content,
         estimate_tokens,
         ensure_session,
+        MAX_EMERGENCY_ESTIMATED_TOKENS,
         mark_turn_dirty,
         write_compact_marker,
         sanitize_pointer,
@@ -41,7 +43,8 @@ else:  # Allow the exact file path used by hooks.example.json.
 
 def _payload() -> dict[str, Any]:
     try:
-        value = json.loads(sys.stdin.read() or "{}")
+        raw = sys.stdin.read() or "{}"
+        value = json.loads(raw.lstrip("\ufeff"))
     except (json.JSONDecodeError, UnicodeError):
         return {}
     return value if isinstance(value, dict) else {}
@@ -120,7 +123,7 @@ def main() -> int:
             workspace_name=str(state.get("workspace_name", "unknown")),
             tool_name=tool_name,
         )
-        if estimate_tokens(manifest) > 250:
+        if estimate_tokens(manifest) > MAX_EMERGENCY_ESTIMATED_TOKENS:
             # The builder normally hashes long/untrusted pointers until this
             # cannot happen. Keep a final tiny capsule rather than silently
             # abandoning the dirty recovery path.
