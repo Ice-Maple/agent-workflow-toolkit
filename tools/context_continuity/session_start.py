@@ -8,20 +8,34 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from .state import checkpoint_content, checkpoint_path, ensure_session
+    from .state import (
+        append_event,
+        checkpoint_content,
+        checkpoint_path,
+        emergency_manifest_content_from_state,
+        ensure_session,
+        clear_compact_marker,
+        read_compact_marker,
+        write_state,
+    )
 else:  # Allow the exact file path used by hooks.example.json.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from tools.context_continuity.state import (  # type: ignore[no-redef]
+        append_event,
         checkpoint_content,
         checkpoint_path,
+        emergency_manifest_content_from_state,
         ensure_session,
+        clear_compact_marker,
+        read_compact_marker,
+        write_state,
     )
 
 
 def _payload() -> dict[str, Any]:
     try:
         value = json.loads(sys.stdin.read() or "{}")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeError):
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -69,50 +83,211 @@ def _startup_summary(content: str) -> str:
 
 def main() -> int:
     payload = _payload()
+    source = payload.get("source")
     try:
         session_dir, state, error = ensure_session(
             payload.get("session_id"),
             payload.get("cwd"),
             source=payload.get("source"),
         )
-    except (OSError, UnicodeError, RuntimeError, ValueError) as exc:
+    except (OSError, UnicodeError, RuntimeError, ValueError, TypeError) as exc:
         _emit_context(f"Context continuity is unavailable: {exc}.")
         return 0
     if error or session_dir is None or state is None:
         _emit_context(f"Context continuity is unavailable: {error or 'unknown error'}.")
         return 0
 
+    transition_warning: str | None = None
+    transition_persisted = True
+    marker = read_compact_marker(session_dir)
+    # A marker is the fallback when PreCompact wrote its manifest but could
+    # not atomically update state.json. Consume it before treating a dirty
+    # session as an ordinary startup.
+    marker_matches_persisted_attempt = bool(
+        marker
+        and marker.get("started_at")
+        and marker.get("started_at") == state.get("last_compact_started_at")
+    )
+    if marker and (
+        state.get("status") not in ("compacting", "safe", "recovery_required")
+        or not marker_matches_persisted_attempt
+    ):
+        marker_origin = marker.get("origin_status") if marker.get("origin_status") in ("safe", "dirty") else "dirty"
+        if state.get("pending_turn_hash"):
+            marker_origin = "dirty"
+        marker_complete = marker.get("status") == "state_write_pending" and (
+            marker_origin == "safe" or bool(marker.get("manifest_hash"))
+        )
+        if source == "compact" and marker_complete:
+            state["status"] = "recovery_required" if marker_origin == "dirty" else "safe"
+            state["origin_status"] = marker_origin if marker_origin == "dirty" else None
+            state["emergency_manifest_hash"] = marker.get("manifest_hash")
+            state["emergency_manifest_chars"] = marker.get("manifest_chars", 0)
+            state["emergency_manifest_estimated_tokens"] = marker.get("manifest_estimated_tokens", 0)
+            state["last_compact_trigger"] = marker.get("trigger")
+            state["last_compact_turn_hash"] = marker.get("turn_hash")
+            state["last_compact_started_at"] = marker.get("started_at")
+            state["last_compact_completed_at"] = None
+            state["last_compact_result"] = "recovered_from_marker"
+        else:
+            state["status"] = "compact_failed"
+            state["last_compact_result"] = "compact_failed_from_marker"
+            transition_warning = "compact recovery marker was found without a durable compacting state"
+        try:
+            write_state(session_dir / "state.json", state)
+            clear_compact_marker(session_dir)
+            marker_event_error = append_event(
+                session_dir,
+                {
+                    "event": "SessionStartMarkerRecovery",
+                    "source": source or "unknown",
+                    "status": state.get("status"),
+                    "origin_status": marker_origin,
+                },
+            )
+            if marker_event_error:
+                transition_warning = f"{transition_warning or 'compact marker recovery'} event was not recorded: {marker_event_error}"
+        except OSError as exc:
+            transition_persisted = False
+            transition_warning = f"{transition_warning or 'compact marker recovery'} could not be persisted: {exc}"
+    elif marker and marker_matches_persisted_attempt:
+        # State already records this exact attempt; a previous cleanup may have
+        # been interrupted, so remove only the now-redundant marker.
+        clear_compact_marker(session_dir)
+
+    # A compacting state is only considered successful when the host delivers
+    # the compact SessionStart. Any other later entry marks the attempt failed
+    # without discarding the last safe checkpoint.
+    if state.get("status") == "compacting":
+        if source == "compact":
+            origin = (
+                "dirty"
+                if state.get("pending_turn_hash")
+                or state.get("emergency_manifest_hash")
+                or state.get("origin_status") == "dirty"
+                else "safe"
+            )
+            sealed_content, sealed_error = checkpoint_content(session_dir, state, require_safe=False)
+            if origin == "safe" and sealed_content is None:
+                state["status"] = "compact_failed"
+                state["last_compact_result"] = "recovered_safe_checkpoint_invalid"
+                transition_warning = f"safe checkpoint could not be verified after compact: {sealed_error or 'unknown error'}"
+            else:
+                state["status"] = "recovery_required" if origin == "dirty" else "safe"
+                state["last_compact_result"] = "recovered_dirty" if origin == "dirty" else "recovered_safe"
+            if origin == "safe" and state.get("status") == "safe":
+                state["origin_status"] = None
+            try:
+                write_state(session_dir / "state.json", state)
+                clear_compact_marker(session_dir)
+                recovery_event_error = append_event(
+                    session_dir,
+                    {
+                        "event": "SessionStart",
+                        "source": "compact",
+                        "status": state["status"],
+                        "origin_status": origin,
+                    },
+                )
+                if recovery_event_error:
+                    transition_warning = f"compact recovery event was not recorded: {recovery_event_error}"
+            except OSError as exc:
+                transition_persisted = False
+                transition_warning = f"could not record compact recovery: {exc}"
+        else:
+            state["status"] = "compact_failed"
+            state["last_compact_result"] = "compact_failed"
+            transition_warning = "compact started but no SessionStart(source=compact) was observed"
+            try:
+                write_state(session_dir / "state.json", state)
+                clear_compact_marker(session_dir)
+                failure_event_error = append_event(
+                    session_dir,
+                    {
+                        "event": "SessionStart",
+                        "source": source or "unknown",
+                        "status": "compact_failed",
+                        "origin_status": state.get("origin_status"),
+                    },
+                )
+                if failure_event_error:
+                    transition_warning = f"compact failure event was not recorded: {failure_event_error}"
+            except OSError as exc:
+                transition_persisted = False
+                transition_warning = f"{transition_warning}; could not record failure: {exc}"
+
     checkpoint = checkpoint_path(session_dir)
+    if not transition_persisted and state.get("status") == "safe":
+        state["status"] = "compact_failed"
+        state["last_compact_result"] = "compact_recovery_state_unpersisted"
     lines = [
         "Context continuity is active.",
         f"Session state directory: {session_dir}",
         f"Checkpoint file: {checkpoint}",
         f"Seal command: {_seal_command(session_dir, session_id=payload.get('session_id', ''), cwd=payload.get('cwd'))}",
     ]
-    content, checkpoint_error = checkpoint_content(session_dir, state)
-    if content is not None:
-        source = payload.get("source")
-        if source == "compact":
+    if transition_warning:
+        lines.append(f"Warning: {transition_warning}.")
+
+    recovery = state.get("status") == "recovery_required"
+    if recovery:
+        content, checkpoint_error = checkpoint_content(session_dir, state, require_safe=False)
+        manifest, manifest_error = emergency_manifest_content_from_state(session_dir, state)
+        lines.append("Recovery is required: verify the workspace and artifacts before resuming work.")
+        if content is not None:
             lines.extend(
                 [
-                    "Verify this sealed checkpoint against the current workspace before continuing:",
+                    "Last safe checkpoint (verify before relying on it):",
                     "--- checkpoint.md ---",
                     content.rstrip(),
                     "--- end checkpoint.md ---",
-                    "Continue from the first incomplete step; do not repeat completed work without evidence.",
                 ]
             )
-        else:
-            lines.append(
-                f"A sealed checkpoint is available (sequence {state.get('checkpoint_seq')}); read it only if needed."
+        elif checkpoint_error:
+            lines.append(f"Last safe checkpoint was not injected: {checkpoint_error}.")
+        if manifest is not None:
+            lines.extend(["Emergency manifest:", "--- emergency.md ---", manifest.rstrip(), "--- end emergency.md ---"])
+        elif manifest_error:
+            lines.append(f"Emergency manifest was not injected: {manifest_error}.")
+        lines.append("Reconcile evidence, then write checkpoint.md and run seal before continuing substantive work.")
+    elif state.get("status") == "compact_failed":
+        content, checkpoint_error = checkpoint_content(session_dir, state, require_safe=False)
+        lines.append("Compact completion is unverified; preserve the last safe checkpoint and inspect evidence before continuing.")
+        if content is not None:
+            lines.extend(
+                [
+                    "Last safe checkpoint (verify before relying on it):",
+                    "--- checkpoint.md ---",
+                    content.rstrip(),
+                    "--- end checkpoint.md ---",
+                ]
             )
-            summary = _startup_summary(content)
-            if summary:
-                lines.append(f"Continuation hints: {summary}")
-    elif checkpoint.exists() and checkpoint_error:
-        lines.append(f"Checkpoint was not injected: {checkpoint_error}. Preserve the last safe state and inspect before continuing.")
+        elif checkpoint_error:
+            lines.append(f"Last safe checkpoint was not injected: {checkpoint_error}.")
     else:
-        lines.append("No sealed checkpoint exists yet. At the end of this turn, write a concise checkpoint and run seal.")
+        content, checkpoint_error = checkpoint_content(session_dir, state)
+        if content is not None:
+            if source == "compact":
+                lines.extend(
+                    [
+                        "Verify this sealed checkpoint against the current workspace before continuing:",
+                        "--- checkpoint.md ---",
+                        content.rstrip(),
+                        "--- end checkpoint.md ---",
+                        "Continue from the first incomplete step; do not repeat completed work without evidence.",
+                    ]
+                )
+            else:
+                lines.append(
+                    f"A sealed checkpoint is available (sequence {state.get('checkpoint_seq')}); read it only if needed."
+                )
+                summary = _startup_summary(content)
+                if summary:
+                    lines.append(f"Continuation hints: {summary}")
+        elif checkpoint.exists() and checkpoint_error:
+            lines.append(f"Checkpoint was not injected: {checkpoint_error}. Preserve the last safe state and inspect before continuing.")
+        else:
+            lines.append("No sealed checkpoint exists yet. At the end of this turn, write a concise checkpoint and run seal.")
 
     _emit_context("\n".join(lines))
     return 0

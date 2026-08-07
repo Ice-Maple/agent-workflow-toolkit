@@ -71,6 +71,24 @@ Wave 1 intentionally has no `PreToolUse` dirty tracking and no `PreCompact`
 Hook. A mid-turn automatic compact before the first seal remains a known Wave 1
 gap and is covered by Wave 2.
 
+## Wave 2 non-blocking compact recovery smoke
+
+Wave 2 adds `fixtures/wave2/hooks.example.json`. It keeps `PreCompact` non-
+blocking: a dirty turn writes only `emergency.md` and compact is allowed to
+finish. `PostCompact` records the host completion, and
+`SessionStart(source=compact)` injects the last sealed checkpoint plus the
+bounded emergency manifest, then marks the session `recovery_required` until a
+new checkpoint is sealed. If a compacting session re-enters through startup or
+resume without the compact source, it is marked `compact_failed` and the last
+safe checkpoint is retained.
+
+The manifest is mechanical only (turn/tool/transcript pointers, workspace,
+sequence and trigger); it must not contain prompt text, transcript contents or
+credentials. Neither `PreCompact` nor `PostCompact` returns `continue:false`.
+Use the fixture only with a private `CODEX_CONTEXT_CONTINUITY_HOME` and an
+isolated Codex App configuration; do not install it into the active user hook
+layer before host smoke evidence is captured.
+
 ## Evidence requirements
 
 At minimum capture:

@@ -1,7 +1,7 @@
 # Codex 上下文连续性实现 Wave 计划
 
 - 日期：2026-08-07
-- 状态：执行中（Wave 0 探针与 Wave 1 连续性骨架已实现；宿主 App smoke 待执行）
+- 状态：执行中（Wave 0 探针、Wave 1 连续性 MVP 与 Wave 2 非阻止恢复骨架已实现；宿主 App smoke 待执行）
 - 设计基线：`docs/brainstorms/2026-08-07-codex-context-continuity.md`
 - 评审处理：`docs/reviews/2026-08-07-codex-context-continuity-review-closure.md`
 

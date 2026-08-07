@@ -17,7 +17,7 @@ else:  # Allow the exact file path used by hooks.example.json.
 def _payload() -> dict[str, Any]:
     try:
         value = json.loads(sys.stdin.read() or "{}")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeError):
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -43,7 +43,7 @@ def main() -> int:
             payload.get("cwd"),
             payload.get("turn_id"),
         )
-    except (OSError, UnicodeError, RuntimeError, ValueError) as exc:
+    except (OSError, UnicodeError, RuntimeError, ValueError, TypeError) as exc:
         _emit({"systemMessage": f"Context continuity check unavailable; allowing turn to end: {exc}"})
         return 0
     # A diagnostic/continuity hook must fail open if the host omits fields or
@@ -53,6 +53,16 @@ def main() -> int:
         return 0
 
     safe_content, _ = checkpoint_content(session_dir, state)
+    if state.get("status") == "compacting":
+        _emit(
+            {
+                "systemMessage": (
+                    "Context compact is in progress; allowing the host to finish its recovery lifecycle "
+                    "before requesting another checkpoint continuation."
+                )
+            }
+        )
+        return 0
     if state.get("status") == "safe" and state.get("last_sealed_turn_hash") and safe_content is not None:
         _emit({})
         return 0

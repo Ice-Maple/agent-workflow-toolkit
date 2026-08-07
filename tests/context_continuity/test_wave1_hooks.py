@@ -9,8 +9,17 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from tools.context_continuity.seal import main as seal_main
+from tools.context_continuity.post_compact import main as post_compact_main
+from tools.context_continuity.pre_compact import main as pre_compact_main
 from tools.context_continuity.session_start import main as session_start_main
-from tools.context_continuity.state import context_home, read_state, session_directory, state_path
+from tools.context_continuity.state import (
+    MAX_EMERGENCY_CHARS,
+    context_home,
+    estimate_tokens,
+    read_state,
+    session_directory,
+    state_path,
+)
 from tools.context_continuity.stop import main as stop_main
 
 
@@ -45,6 +54,76 @@ class Wave1HookTests(unittest.TestCase):
             result = stop_main()
         self.assertEqual(result, 0)
         return json.loads(output.getvalue())
+
+    def _run_precompact(
+        self,
+        temp_home: str,
+        workspace: str,
+        *,
+        trigger: str = "auto",
+        turn_id: str = "wave1-turn",
+        prompt: str | None = None,
+        transcript_path: str = "C:/transcript.jsonl",
+        tool_name: str = "Bash",
+    ) -> dict:
+        payload = {
+            "hook_event_name": "PreCompact",
+            "trigger": trigger,
+            "session_id": "wave1-session",
+            "cwd": workspace,
+            "turn_id": turn_id,
+            "transcript_path": transcript_path,
+            "tool_name": tool_name,
+        }
+        if prompt is not None:
+            payload["prompt"] = prompt
+        output = io.StringIO()
+        with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": temp_home}), patch(
+            "sys.stdin", io.StringIO(json.dumps(payload))
+        ), redirect_stdout(output):
+            result = pre_compact_main()
+        self.assertEqual(result, 0)
+        return json.loads(output.getvalue())
+
+    def _run_postcompact(self, temp_home: str, workspace: str, *, trigger: str = "auto") -> dict:
+        payload = {
+            "hook_event_name": "PostCompact",
+            "trigger": trigger,
+            "session_id": "wave1-session",
+            "cwd": workspace,
+            "turn_id": "wave1-turn",
+        }
+        output = io.StringIO()
+        with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": temp_home}), patch(
+            "sys.stdin", io.StringIO(json.dumps(payload))
+        ), redirect_stdout(output):
+            result = post_compact_main()
+        self.assertEqual(result, 0)
+        return json.loads(output.getvalue())
+
+    def _seal_checkpoint(self, temp_home: str, workspace: str, session_dir: Path, content: str) -> None:
+        (session_dir / "checkpoint.md").write_text(content, encoding="utf-8")
+        with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": temp_home}), redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                seal_main(
+                    [
+                        "--session-dir",
+                        str(session_dir),
+                        "--cwd",
+                        workspace,
+                        "--session-id",
+                        "wave1-session",
+                    ]
+                ),
+                0,
+            )
+
+    def _prepare_safe_checkpoint(self, temp_home: str, workspace: str) -> Path:
+        self._run_session_start(temp_home, workspace)
+        session_dir = session_directory("wave1-session", home=Path(temp_home))
+        self._run_stop(temp_home, workspace)
+        self._seal_checkpoint(temp_home, workspace, session_dir, "# Current task\n- Goal: preserve continuity\n- Next: verify\n")
+        return session_dir
 
     def test_session_start_creates_private_state_and_injects_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
@@ -183,6 +262,175 @@ class Wave1HookTests(unittest.TestCase):
             result = self._run_session_start(temp_home, workspace, source="resume")
             context = result["hookSpecificOutput"]["additionalContext"]
             self.assertIn("invalid state.json", context)
+
+    def test_safe_precompact_roundtrip_restores_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            result = self._run_precompact(temp_home, workspace, trigger="auto", turn_id="wave1-turn")
+            self.assertNotIn("continue", result)
+            state = read_state(session_dir)
+            self.assertEqual(state["status"], "compacting")
+            self.assertEqual(state["origin_status"], "safe")
+            self.assertIsNone(state["emergency_manifest_hash"])
+
+            self.assertEqual(self._run_postcompact(temp_home, workspace), {})
+            result = self._run_session_start(temp_home, workspace, source="compact")
+            context = result["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("preserve continuity", context)
+            self.assertEqual(read_state(session_dir)["status"], "safe")
+
+    def test_dirty_precompact_writes_manifest_and_enters_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            self._run_precompact(
+                temp_home,
+                workspace,
+                trigger="auto",
+                turn_id="new-turn",
+                prompt="password=must-never-be-written",
+                transcript_path="C:/private/transcript.jsonl",
+            )
+            state = read_state(session_dir)
+            self.assertEqual(state["status"], "compacting")
+            self.assertEqual(state["origin_status"], "dirty")
+            self.assertTrue((session_dir / "emergency.md").exists())
+            manifest = (session_dir / "emergency.md").read_text(encoding="utf-8")
+            self.assertNotIn("must-never-be-written", manifest)
+            self.assertLessEqual(len(manifest), MAX_EMERGENCY_CHARS)
+            self.assertLessEqual(estimate_tokens(manifest), 250)
+
+            self._run_postcompact(temp_home, workspace)
+            result = self._run_session_start(temp_home, workspace, source="compact")
+            context = result["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("Recovery is required", context)
+            self.assertIn("preserve continuity", context)
+            self.assertIn("Emergency manifest", context)
+            self.assertEqual(read_state(session_dir)["status"], "recovery_required")
+
+            self._seal_checkpoint(
+                temp_home,
+                workspace,
+                session_dir,
+                "# Current task\n- Goal: preserve continuity\n- Next: inspect recovered evidence\n",
+            )
+            self.assertEqual(read_state(session_dir)["status"], "safe")
+
+    def test_manual_dirty_precompact_warns_without_blocking_compact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            self._prepare_safe_checkpoint(temp_home, workspace)
+            result = self._run_precompact(temp_home, workspace, trigger="manual", turn_id="new-turn")
+            self.assertNotIn("continue", result)
+            self.assertIn("allowed", result["systemMessage"])
+
+    def test_missing_compact_session_start_marks_compact_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            self._run_precompact(temp_home, workspace, turn_id="new-turn")
+            result = self._run_session_start(temp_home, workspace, source="resume")
+            context = result["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("no SessionStart(source=compact)", context)
+            self.assertEqual(read_state(session_dir)["status"], "compact_failed")
+
+    def test_tampered_safe_checkpoint_is_treated_as_dirty_before_compact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            (session_dir / "checkpoint.md").write_text("# tampered\n- Next: do not trust\n", encoding="utf-8")
+            self._run_precompact(temp_home, workspace, turn_id="new-turn")
+            state = read_state(session_dir)
+            self.assertEqual(state["status"], "compacting")
+            self.assertEqual(state["origin_status"], "dirty")
+            self.assertIn("Origin: dirty", (session_dir / "emergency.md").read_text(encoding="utf-8"))
+
+    def test_compact_pointers_are_hashed_before_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            self._run_precompact(
+                temp_home,
+                workspace,
+                turn_id="new-turn",
+                transcript_path="C:/tmp/client_secret=SHOULD_NOT_PERSIST",
+                tool_name="mcp-password=SECRET",
+            )
+            manifest = (session_dir / "emergency.md").read_text(encoding="utf-8")
+            state = read_state(session_dir)
+            self.assertNotIn("SHOULD_NOT_PERSIST", manifest)
+            self.assertNotIn("SECRET", manifest)
+            self.assertNotIn("SHOULD_NOT_PERSIST", json.dumps(state))
+            self.assertNotIn("SECRET", json.dumps(state))
+
+    def test_duplicate_precompact_preserves_safe_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            self._run_precompact(temp_home, workspace, turn_id="wave1-turn")
+            self._run_precompact(temp_home, workspace, turn_id="wave1-turn")
+            state = read_state(session_dir)
+            self.assertEqual(state["status"], "compacting")
+            self.assertEqual(state["origin_status"], "safe")
+            self.assertIsNone(state["emergency_manifest_hash"])
+
+    def test_state_write_failure_uses_marker_for_dirty_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            with patch("tools.context_continuity.pre_compact.write_state", side_effect=OSError("simulated state failure")):
+                result = self._run_precompact(temp_home, workspace, turn_id="new-turn")
+            self.assertIn("compact", result["systemMessage"])
+            self.assertTrue((session_dir / "compact-marker.json").exists())
+            result = self._run_session_start(temp_home, workspace, source="compact")
+            context = result["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("Recovery is required", context)
+            self.assertEqual(read_state(session_dir)["status"], "recovery_required")
+
+    def test_state_write_failure_on_safe_attempt_is_not_claimed_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            with patch("tools.context_continuity.pre_compact.write_state", side_effect=OSError("simulated state failure")):
+                self._run_precompact(temp_home, workspace, turn_id="wave1-turn")
+            result = self._run_session_start(temp_home, workspace, source="resume")
+            context = result["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("compact recovery marker", context)
+            self.assertEqual(read_state(session_dir)["status"], "compact_failed")
+
+    def test_manifest_write_failure_preserves_last_safe_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            with patch(
+                "tools.context_continuity.pre_compact.write_emergency_manifest",
+                side_effect=OSError("simulated manifest failure"),
+            ):
+                self._run_precompact(temp_home, workspace, turn_id="new-turn")
+            result = self._run_session_start(temp_home, workspace, source="resume")
+            context = result["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("Compact completion is unverified", context)
+            self.assertIn("preserve continuity", context)
+            self.assertEqual(read_state(session_dir)["status"], "compact_failed")
+
+    def test_postcompact_stale_event_does_not_change_safe_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            self.assertIn("stale PostCompact", self._run_postcompact(temp_home, workspace)["systemMessage"])
+            self.assertEqual(read_state(session_dir)["status"], "safe")
+
+    def test_recovery_required_stop_does_not_downgrade_to_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:
+            session_dir = self._prepare_safe_checkpoint(temp_home, workspace)
+            self._run_precompact(temp_home, workspace, turn_id="new-turn")
+            self._run_postcompact(temp_home, workspace)
+            self._run_session_start(temp_home, workspace, source="compact")
+            result = self._run_stop(temp_home, workspace)
+            self.assertEqual(result["decision"], "block")
+            self.assertEqual(read_state(session_dir)["status"], "recovery_required")
+
+    def test_malformed_cwd_fails_open_without_traceback(self) -> None:
+        payload = {
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "session_id": "wave1-session",
+            "cwd": {"not": "a path"},
+        }
+        output = io.StringIO()
+        with patch.dict("os.environ", {}), patch("sys.stdin", io.StringIO(json.dumps(payload))), redirect_stdout(output):
+            self.assertEqual(session_start_main(), 0)
+        self.assertIn("invalid cwd", json.loads(output.getvalue())["hookSpecificOutput"]["additionalContext"])
 
     def test_corrupt_state_is_not_silently_replaced(self) -> None:
         with tempfile.TemporaryDirectory() as temp_home, tempfile.TemporaryDirectory() as workspace:

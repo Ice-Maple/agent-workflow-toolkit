@@ -1,0 +1,61 @@
+{
+  "description": "Wave 2 non-blocking PreCompact recovery hooks. Replace <REPO_ROOT> before use.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/session_start.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\session_start.py\"",
+            "additionalContextLimit": 1200,
+            "timeout": 10,
+            "statusMessage": "Loading context continuity recovery state"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/pre_compact.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\pre_compact.py\"",
+            "timeout": 10,
+            "statusMessage": "Saving context continuity recovery manifest"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/post_compact.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\post_compact.py\"",
+            "timeout": 10,
+            "statusMessage": "Recording context continuity compact completion"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"<REPO_ROOT>/tools/context_continuity/stop.py\"",
+            "commandWindows": "py -3 \"<REPO_ROOT>\\tools\\context_continuity\\stop.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking context continuity checkpoint"
+          }
+        ]
+      }
+    ]
+  }
+}
