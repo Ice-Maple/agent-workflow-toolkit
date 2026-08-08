@@ -1,7 +1,7 @@
 # 多 Agent 协同 Workflow MVP 实施 Wave 计划
 
 - 日期：2026-08-07
-- 状态：Wave 0 实施中（协议合同与 fake contract 已通过本地 Go 验证）
+- 状态：Wave 1 实现与本地验证完成，已交接 Wave 2；修复后外部复审尚未重新执行
 - 设计基线：[多 Agent 协同 Workflow MVP](../brainstorms/2026-08-07-multi-agent-orchestration-mvp.md)
 - 独立复审处理：[复审问题处理记录](../reviews/2026-08-07-multi-agent-orchestration-mvp-rereview-closure.md)
 - 研究与执行证据：[Cursor Agent 评审派发与结果交付调查](../research/2026-08-07-cursor-agent-review-delivery-investigation.md)
@@ -103,6 +103,7 @@ Skill 只理解用户目标、具体 Workflow 和人工检查点，不能拼接 
 2. 实现分层文件存储：用户级事件/快照/诊断目录与任务指定 artifact 路径分离；同目录临时文件、flush/sync/close、Windows replace、恢复旧文件和 journal 证据完整。
 3. 实现 TaskGateway v1：
    - `createTask`、`proposeNode`、`runPreflight`、`prepareAttempt`；
+   - `prepareRetryAttempt`、`prepareFallbackAttempt`（均创建新 Attempt 并保留 lineage）；
    - `pollHostActions`、`submitHostActionResult`、带因果 action 的 provider binding/event；
    - `requestCompletion`、`recordHumanDecision`、`requestCancel`；
    - `enableGoalMode`、`revokeGoalMode` 和作用域/TaskRevision 校验。
@@ -323,6 +324,6 @@ Wave 0 通过后，第一轮实际实现建议按以下原子任务建立提交�
 
 ## 当前决策点
 
-Wave 0 已启动并完成第一批可执行产物：protocol v1、能力探针入口、fake contract 和证据格式。Go 工具链当前通过绝对路径调用；待用户重启 Codex App 后再验证新 PATH，不影响本轮实现。
+Wave 0 的第一批可执行产物已经落盘：protocol v1、能力探针入口、fake contract 和证据格式。当前已进入 Wave 1，完成了 `Task/Revision/Node/Attempt/HostAction/Event` 的第一版状态模型、文件 snapshot/event 存储、显式 binding preflight、host action lease、request/action 幂等、checkpoint、Goal authority 骨架以及 fake E2E vertical slice。
 
-Wave 0 完成后应再次停在人工检查点，确认实际宿主能力和合同，再进入 Wave 1；不自动连续执行后续 Wave。
+Wave 1 的 Go 核心实现、文件存储、TaskGateway、策略门禁和 fake E2E 已完成；最近一次 Cursor / Grok 4.5 High（非 Fast）复审为 `PASS WITH CONDITIONS`，其最后一个 P1（确认取消后人工 retry 无法重新创建同节点 Attempt）已修复并通过 `go test -race ./...`、`go vet ./...`、`go build ./...` 和 `git diff --check`。修复后的外部复审尚未重新执行，详见 [Wave 1 当前状态与交接记录](../reviews/2026-08-08-wave1-closure-status.md)。Native Controller Skill、Adapter 驱动的 durable delivery、真实 Provider 进程取消/超时和外部 CLI 集成仍按 Wave 2/3 顺序执行，不计入 Wave 1。

@@ -62,6 +62,8 @@ Wave 3 不改变上面的“允许压缩”策略，只把几个容易依赖模�
 
 建议先在临时 workspace 中验证，不要立即写入全局 `~/.codex/hooks.json`。
 
+如果验证通过后要在其他机器或用户环境中重复安装、备份和还原，请使用[跨环境配置与还原指南](codex-context-continuity-global-setup.md)及其安装器；全局安装是明确的用户操作，不会由本功能自动执行。
+
 ### 1. 先运行本地测试
 
 在仓库根目录执行：
@@ -241,7 +243,7 @@ Wave 2 的 SessionStart Fixture 使用 `1200`；Wave 3 使用 `800`，因为 Wav
 Remove-Item Env:CODEX_CONTEXT_CONTINUITY_HOME -ErrorAction SilentlyContinue
 ```
 
-这不会修改业务仓库文件。用户级 `~/.codex/hooks.json` 和全局 `config.toml` 从未被本功能自动修改。
+这不会修改业务仓库文件。仓库默认不会自动修改用户级 `~/.codex/hooks.json` 或全局 `config.toml`；如果明确运行全局安装器，请按[跨环境配置与还原指南](codex-context-continuity-global-setup.md)保留备份并使用 manifest 还原。
 
 ## 当前成熟度
 
@@ -267,5 +269,7 @@ Wave 3 的本地脚本 smoke 已通过，但真实宿主 smoke 仍需单独验�
 - [设计说明](../brainstorms/2026-08-07-codex-context-continuity.md)
 - [Wave 2 Hook Fixture](../../tests/context_continuity/fixtures/wave2/hooks.example.json)
 - [Wave 3 Hook Fixture](../../tests/context_continuity/fixtures/wave3/hooks.example.json)
+- [跨环境配置与还原指南](codex-context-continuity-global-setup.md)
+- [全局安装/还原脚本](../../tools/context_continuity/install_global.py)
 - [本地 CLI smoke 证据](../../tests/context_continuity/evidence/2026-08-07/W2-local-cli-smoke.md)
 - [Wave 3 本地 CLI smoke 证据](../../tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md)

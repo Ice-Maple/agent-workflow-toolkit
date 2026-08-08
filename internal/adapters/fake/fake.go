@@ -52,6 +52,7 @@ type Result struct {
 	Terminal       bool
 	SideEffect     string
 	Identity       map[string]string
+	TaskCanary     string
 }
 
 type Call struct {
@@ -104,7 +105,13 @@ func (a *Adapter) Execute(action HostAction) (Result, error) {
 		"provider": "fake",
 		"session":  "fake-session-" + action.AttemptID,
 	}
+	if workspace, ok := action.Parameters["workspace"].(string); ok && workspace != "" {
+		identity["workspace"] = workspace
+	}
 	result := Result{ActionID: action.ID, AttemptID: action.AttemptID, Kind: action.Kind, SideEffect: "none", Identity: identity}
+	if canary, ok := action.Parameters["task_canary"].(string); ok {
+		result.TaskCanary = canary
+	}
 	switch action.Kind {
 	case Launch:
 		result.Status = "running"

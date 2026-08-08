@@ -16,6 +16,15 @@ func TestDecodeRequestAcceptsValidEnvelope(t *testing.T) {
 	}
 }
 
+func TestDecodeRequestAcceptsRetryAndFallbackOperations(t *testing.T) {
+	for _, operation := range []string{"prepareRetryAttempt", "prepareFallbackAttempt"} {
+		request := `{"protocol_version":1,"request_id":"req-` + operation + `","operation":"` + operation + `","payload":{}}`
+		if _, err := DecodeRequest(strings.NewReader(request)); err != nil {
+			t.Fatalf("DecodeRequest(%s) error = %v", operation, err)
+		}
+	}
+}
+
 func TestDecodeRequestRejectsUnsupportedMajor(t *testing.T) {
 	_, err := DecodeRequest(strings.NewReader(`{"protocol_version":2,"request_id":"req-1","operation":"runPreflight","payload":{}}`))
 	assertProtocolCode(t, err, ErrProtocolVersion)

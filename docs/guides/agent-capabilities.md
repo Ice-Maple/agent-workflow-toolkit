@@ -38,6 +38,7 @@
 - 配置入口：[`tests/context_continuity/fixtures/wave3/hooks.example.json`](../../tests/context_continuity/fixtures/wave3/hooks.example.json)
 - 运行脚本：[`tools/context_continuity/`](../../tools/context_continuity/)
 - 用户指南：[`docs/guides/codex-context-continuity.md`](codex-context-continuity.md)
+- 跨环境安装与还原：[`docs/guides/codex-context-continuity-global-setup.md`](codex-context-continuity-global-setup.md)
 - 测试说明：[`tests/context_continuity/README.md`](../../tests/context_continuity/README.md)
 - 本地 smoke 证据：[`tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md`](../../tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md)
 

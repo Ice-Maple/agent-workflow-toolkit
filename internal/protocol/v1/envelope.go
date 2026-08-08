@@ -21,6 +21,8 @@ var operations = map[string]struct{}{
 	"proposeNode":            {},
 	"runPreflight":           {},
 	"prepareAttempt":         {},
+	"prepareRetryAttempt":    {},
+	"prepareFallbackAttempt": {},
 	"pollHostActions":        {},
 	"submitHostActionResult": {},
 	"bindProviderHandle":     {},
