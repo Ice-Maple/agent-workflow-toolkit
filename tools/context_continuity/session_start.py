@@ -18,6 +18,8 @@ if __package__:
         hot_content,
         clear_compact_marker,
         read_compact_marker,
+        session_directory,
+        session_state_lock,
         write_state,
     )
 else:  # Allow the exact file path used by hooks.example.json.
@@ -32,6 +34,8 @@ else:  # Allow the exact file path used by hooks.example.json.
         hot_content,
         clear_compact_marker,
         read_compact_marker,
+        session_directory,
+        session_state_lock,
         write_state,
     )
 
@@ -54,8 +58,13 @@ def _emit_context(text: str) -> None:
             }
         },
         sys.stdout,
-        ensure_ascii=False,
+        ensure_ascii=True,
     )
+    sys.stdout.write("\n")
+
+
+def _emit_empty() -> None:
+    json.dump({}, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")
 
 
@@ -107,8 +116,21 @@ def _hot_or_bounded_warm(
     return None, None, hot_error or warm_error
 
 
-def main() -> int:
-    payload = _payload()
+def _status_after_safe_compact(
+    session_dir: Path,
+    state: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Return the quiet post-compact status for a non-dirty origin."""
+
+    if state.get("checkpoint_seq", 0) == 0 and state.get("checkpoint_hash") is None:
+        return "clean", None
+    sealed_content, sealed_error = checkpoint_content(session_dir, state, require_safe=False)
+    if sealed_content is None:
+        return "compact_failed", sealed_error or "unknown error"
+    return "safe", None
+
+
+def _main_locked(payload: dict[str, Any], *, quiet_initial: bool) -> int:
     source = payload.get("source")
     try:
         session_dir, state, error = ensure_session(
@@ -145,8 +167,15 @@ def main() -> int:
             marker_origin == "safe" or bool(marker.get("manifest_hash"))
         )
         if source == "compact" and marker_complete:
-            state["status"] = "recovery_required" if marker_origin == "dirty" else "safe"
-            state["origin_status"] = marker_origin if marker_origin == "dirty" else None
+            if marker_origin == "dirty":
+                state["status"] = "recovery_required"
+                state["origin_status"] = "dirty"
+            else:
+                recovered_status, recovered_error = _status_after_safe_compact(session_dir, state)
+                state["status"] = recovered_status
+                state["origin_status"] = None
+                if recovered_error:
+                    transition_warning = f"safe checkpoint could not be verified after compact: {recovered_error}"
             state["emergency_manifest_hash"] = marker.get("manifest_hash")
             state["emergency_manifest_chars"] = marker.get("manifest_chars", 0)
             state["emergency_manifest_estimated_tokens"] = marker.get("manifest_estimated_tokens", 0)
@@ -193,15 +222,20 @@ def main() -> int:
                 or state.get("origin_status") == "dirty"
                 else "safe"
             )
-            sealed_content, sealed_error = checkpoint_content(session_dir, state, require_safe=False)
-            if origin == "safe" and sealed_content is None:
-                state["status"] = "compact_failed"
-                state["last_compact_result"] = "recovered_safe_checkpoint_invalid"
-                transition_warning = f"safe checkpoint could not be verified after compact: {sealed_error or 'unknown error'}"
+            if origin == "safe":
+                recovered_status, recovered_error = _status_after_safe_compact(session_dir, state)
+                state["status"] = recovered_status
+                if recovered_status == "compact_failed":
+                    state["last_compact_result"] = "recovered_safe_checkpoint_invalid"
+                    transition_warning = f"safe checkpoint could not be verified after compact: {recovered_error or 'unknown error'}"
+                elif recovered_status == "clean":
+                    state["last_compact_result"] = "recovered_clean"
+                else:
+                    state["last_compact_result"] = "recovered_safe"
             else:
-                state["status"] = "recovery_required" if origin == "dirty" else "safe"
-                state["last_compact_result"] = "recovered_dirty" if origin == "dirty" else "recovered_safe"
-            if origin == "safe" and state.get("status") == "safe":
+                state["status"] = "recovery_required"
+                state["last_compact_result"] = "recovered_dirty"
+            if origin == "safe" and state.get("status") in ("clean", "safe"):
                 state["origin_status"] = None
             try:
                 write_state(session_dir / "state.json", state)
@@ -243,9 +277,12 @@ def main() -> int:
                 transition_warning = f"{transition_warning}; could not record failure: {exc}"
 
     checkpoint = checkpoint_path(session_dir)
-    if not transition_persisted and state.get("status") == "safe":
+    if not transition_persisted and state.get("status") in ("clean", "safe"):
         state["status"] = "compact_failed"
         state["last_compact_result"] = "compact_recovery_state_unpersisted"
+    if quiet_initial and state.get("status") == "clean" and not transition_warning:
+        _emit_empty()
+        return 0
     lines = [
         "Context continuity is active.",
         f"Session state directory: {session_dir}",
@@ -325,11 +362,31 @@ def main() -> int:
                     lines.append(f"Continuation hints: {summary}")
         elif checkpoint.exists() and checkpoint_error:
             lines.append(f"Checkpoint was not injected: {checkpoint_error}. Preserve the last safe state and inspect before continuing.")
+        elif state.get("status") == "dirty":
+            lines.append(
+                "Unsealed external mutations were recorded. Native compaction remains available; "
+                "if recovery is needed, verify workspace evidence before creating a manual checkpoint."
+            )
         else:
             lines.append("No sealed checkpoint exists yet. At the end of this turn, write a concise checkpoint and run seal.")
 
     _emit_context("\n".join(lines))
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    quiet_initial = "--quiet-initial" in (sys.argv[1:] if argv is None else argv)
+    payload = _payload()
+    try:
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("missing session_id")
+        session_dir = session_directory(session_id)
+        with session_state_lock(session_dir):
+            return _main_locked(payload, quiet_initial=quiet_initial)
+    except (OSError, UnicodeError, RuntimeError, ValueError, TypeError) as exc:
+        _emit_context(f"Context continuity is unavailable: {exc}.")
+        return 0
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
 # 多 Agent 协同 Workflow MVP 实施 Wave 计划
 
 - 日期：2026-08-07
-- 状态：Wave 1 实现与本地验证完成，已交接 Wave 2；修复后外部复审尚未重新执行
+- 状态：Wave 1 实现与本地验证完成；Wave 2 Codex App Native MVP smoke 与人工批准已完成，Wave3 尚未开始
 - 设计基线：[多 Agent 协同 Workflow MVP](../brainstorms/2026-08-07-multi-agent-orchestration-mvp.md)
 - 独立复审处理：[复审问题处理记录](../reviews/2026-08-07-multi-agent-orchestration-mvp-rereview-closure.md)
 - 研究与执行证据：[Cursor Agent 评审派发与结果交付调查](../research/2026-08-07-cursor-agent-review-delivery-investigation.md)
+- Wave2→Wave3 交接：[Wave2 closure and Wave3 handoff](../reviews/2026-08-09-wave2-closure-wave3-handoff.md)
 
 ## 计划结论
 
@@ -174,7 +175,7 @@ Skill 只理解用户目标、具体 Workflow 和人工检查点，不能拼接 
 - 用户能看到准确的 role/Adapter/model/Reasoning 派发提示。
 - 节点完成后不会未经批准进入下游节点。
 - required artifact、空输出、cancel/timeout、identity mismatch 都能得到核心可判定结果。
-- Wave 2 reviewer 和人工检查点通过；此时标记“Native MVP 可用”，但尚未标记 `experimental`。
+- Wave 2 reviewer smoke、artifact 校验和 Gateway 人工检查点已通过，标记“Native MVP 可用”；仍不标记 `experimental`，也不自动进入 Wave3。
 
 ### 回滚
 
@@ -326,4 +327,4 @@ Wave 0 通过后，第一轮实际实现建议按以下原子任务建立提交�
 
 Wave 0 的第一批可执行产物已经落盘：protocol v1、能力探针入口、fake contract 和证据格式。当前已进入 Wave 1，完成了 `Task/Revision/Node/Attempt/HostAction/Event` 的第一版状态模型、文件 snapshot/event 存储、显式 binding preflight、host action lease、request/action 幂等、checkpoint、Goal authority 骨架以及 fake E2E vertical slice。
 
-Wave 1 的 Go 核心实现、文件存储、TaskGateway、策略门禁和 fake E2E 已完成；最近一次 Cursor / Grok 4.5 High（非 Fast）复审为 `PASS WITH CONDITIONS`，其最后一个 P1（确认取消后人工 retry 无法重新创建同节点 Attempt）已修复并通过 `go test -race ./...`、`go vet ./...`、`go build ./...` 和 `git diff --check`。修复后的外部复审尚未重新执行，详见 [Wave 1 当前状态与交接记录](../reviews/2026-08-08-wave1-closure-status.md)。Native Controller Skill、Adapter 驱动的 durable delivery、真实 Provider 进程取消/超时和外部 CLI 集成仍按 Wave 2/3 顺序执行，不计入 Wave 1。
+Wave 1 的 Go 核心实现、文件存储、TaskGateway、策略门禁和 fake E2E 已完成；最近一次 Cursor / Grok 4.5 High（非 Fast）复审为 `PASS WITH CONDITIONS`，其最后一个 P1（确认取消后人工 retry 无法重新创建同节点 Attempt）已修复并通过 `go test -race ./...`、`go vet ./...`、`go build ./...` 和 `git diff --check`。修复后的外部复审尚未重新执行，详见 [Wave 1 当前状态与交接记录](../reviews/2026-08-08-wave1-closure-status.md)。Wave 2 已落地 Controller Skill、Native action contract、fake Native executor 及其 contract 测试，并已用 Codex App 原生 Subagent 完成真实 launch/observe/completion、artifact delivery 和 `approve` 人工检查点；Native MVP 已验收，详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`，Wave3 尚未开始。

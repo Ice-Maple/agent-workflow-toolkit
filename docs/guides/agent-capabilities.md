@@ -75,8 +75,8 @@ SubagentStop    → subagent_stop.py
 - 测试与运行说明：[`tests/orchestration/README.md`](../../tests/orchestration/README.md)
 - 设计与计划：[`docs/brainstorms/2026-08-07-multi-agent-orchestration-mvp.md`](../brainstorms/2026-08-07-multi-agent-orchestration-mvp.md) 和 [`docs/plans/2026-08-07-multi-agent-orchestration-mvp-waves.md`](../plans/2026-08-07-multi-agent-orchestration-mvp-waves.md)
 
-计划中提到的 `skills/multi-agent-orchestration/` Controller Skill 目前尚未出现在仓库中，
-不要把计划目录中的目标结构误认为已经交付的入口。
+`skills/multi-agent-orchestration/` Controller Skill 已完成真实 Codex App Native smoke、artifact 校验和人工批准，
+详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`；Wave2 Native MVP 已验收，但尚未进入 Wave3 外部 CLI 或 `experimental` 阶段。
 
 ## 按目录判断“这是什么”
 
@@ -95,7 +95,7 @@ SubagentStop    → subagent_stop.py
 ## 当前仍存在的整理缺口
 
 1. 上下文连续性只有 Hook 入口，没有对应的模型行为 Skill。
-2. 多 Agent 计划里预留了 Controller Skill 路径，但该 Skill 还没有实现。
+2. 多 Agent Wave 2 的 Controller Skill、fake contract、真实 Native smoke 和 reviewer 人工批准已落地；Wave3 尚未开始。
 3. 以前各功能按各自 Wave 逐步加入，暂时没有统一的 capability manifest 或根级入口索引。
 
 因此，今后新增功能至少应同时登记：

@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
         turn_id=args.turn_id,
         session_id=args.session_id,
     )
-    json.dump(result, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    json.dump(result, sys.stdout, ensure_ascii=True, separators=(",", ":"))
     sys.stdout.write("\n")
     return code
 

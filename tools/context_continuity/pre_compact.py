@@ -18,6 +18,8 @@ if __package__:
         ensure_session,
         MAX_EMERGENCY_ESTIMATED_TOKENS,
         mark_turn_dirty,
+        session_directory,
+        session_state_lock,
         write_compact_marker,
         sanitize_pointer,
         write_emergency_manifest,
@@ -34,6 +36,8 @@ else:  # Allow the exact file path used by hooks.example.json.
         ensure_session,
         MAX_EMERGENCY_ESTIMATED_TOKENS,
         mark_turn_dirty,
+        session_directory,
+        session_state_lock,
         write_compact_marker,
         sanitize_pointer,
         write_emergency_manifest,
@@ -51,20 +55,15 @@ def _payload() -> dict[str, Any]:
 
 
 def _emit(value: dict[str, Any]) -> None:
-    json.dump(value, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    json.dump(value, sys.stdout, ensure_ascii=True, separators=(",", ":"))
     sys.stdout.write("\n")
 
 
-def main() -> int:
-    payload = _payload()
+def _main_locked(payload: dict[str, Any], *, mutation_only: bool) -> int:
     session_id = payload.get("session_id")
     cwd = payload.get("cwd")
     turn_id = payload.get("turn_id")
     trigger = payload.get("trigger")
-    if trigger not in ("manual", "auto"):
-        _emit({"systemMessage": "Context continuity PreCompact received no valid trigger; allowing compact to continue."})
-        return 0
-
     try:
         session_dir, state, error = ensure_session(session_id, cwd, source="precompact")
     except (OSError, UnicodeError, RuntimeError, ValueError, TypeError) as exc:
@@ -94,23 +93,36 @@ def main() -> int:
             _emit({})
         return 0
 
-    # A new turn becomes dirty before compact only when it is not the last
-    # successfully sealed turn. This keeps the safe boundary path manifest-free.
-    if turn_id:
+    # Wave 1/2 compatibility treats every new compacting turn as dirty. The
+    # globally installed Wave 3 profile opts into mutation-only tracking so a
+    # normal compact cannot manufacture a recovery obligation.
+    if not mutation_only and turn_id:
         session_dir, marked_state, mark_error = mark_turn_dirty(session_id, cwd, turn_id)
         if mark_error or session_dir is None or marked_state is None:
             _emit({"systemMessage": f"Context continuity could not mark the turn dirty; allowing compact to continue: {mark_error or 'unknown error'}"})
             return 0
         state = marked_state
 
-    safe_checkpoint, safe_error = checkpoint_content(session_dir, state)
-    origin_status = "safe" if state.get("status") == "safe" and safe_checkpoint is not None else "dirty"
+    safe_checkpoint, _ = checkpoint_content(session_dir, state)
+    # Compaction is not itself a mutation. A pristine session or a session
+    # whose latest external mutation was sealed can compact without creating a
+    # synthetic recovery obligation.
+    origin_status = (
+        "safe"
+        if state.get("status") == "clean"
+        or (state.get("status") == "safe" and safe_checkpoint is not None)
+        else "dirty"
+    )
     now = datetime.now(timezone.utc).isoformat()
     transcript_path = sanitize_pointer(payload.get("transcript_path"), 4096, always_hash=True)
     tool_name = sanitize_pointer(payload.get("tool_name") or payload.get("last_tool_name"), 256, always_hash=True)
 
     if origin_status == "dirty":
-        generation = int(state.get("dirty_generation", 0)) + 1
+        generation = (
+            max(1, int(state.get("dirty_generation", 0)))
+            if mutation_only
+            else int(state.get("dirty_generation", 0)) + 1
+        )
         state["dirty_generation"] = generation
         if turn_id and state.get("pending_turn_hash") is None:
             state["pending_turn_hash"] = digest(turn_id)
@@ -245,6 +257,24 @@ def main() -> int:
     else:
         _emit({})
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    mutation_only = "--mutation-only" in (sys.argv[1:] if argv is None else argv)
+    payload = _payload()
+    if payload.get("trigger") not in ("manual", "auto"):
+        _emit({"systemMessage": "Context continuity PreCompact received no valid trigger; allowing compact to continue."})
+        return 0
+    try:
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("missing session_id")
+        session_dir = session_directory(session_id)
+        with session_state_lock(session_dir):
+            return _main_locked(payload, mutation_only=mutation_only)
+    except (OSError, UnicodeError, RuntimeError, ValueError, TypeError) as exc:
+        _emit({"systemMessage": f"Context continuity PreCompact unavailable; allowing compact to continue: {exc}"})
+        return 0
 
 
 if __name__ == "__main__":

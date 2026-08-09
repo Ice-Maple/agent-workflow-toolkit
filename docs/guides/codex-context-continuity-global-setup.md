@@ -1,10 +1,12 @@
-# Codex 上下文连续性 Wave 3：跨环境配置与还原指南
+# Codex 上下文连续性 Wave 3：非阻塞全局配置与还原指南
 
 ## 适用范围
 
 这份指南用于把本仓库的 Wave 3 上下文连续性 Hook 应用到另一台机器、另一个用户或另一个 Codex App/CLI 环境。
 
-Wave 3 当前的状态是：脚本实现、本地回归和 CLI smoke 已完成；真实 Codex App 宿主的完整事件顺序仍需要在目标环境单独验证。因此推荐按“隔离验证 → 全局应用 → 观察 → 必要时还原”的顺序操作。
+Wave 3 的全局默认配置是非阻塞的：它观察工具、压缩和子 Agent 生命周期，但不注册 `Stop` Hook，不会在正常回复结束时插入 checkpoint continuation。真实 Codex App 的事件顺序仍应在目标环境验证，因此推荐按“预览 → 备份后全局应用 → 重启并观察 → 必要时还原”的顺序操作。
+
+如果环境中仍出现 `Write a concise checkpoint.md ...` 或 `<hook_prompt ...>`，说明还加载着旧版阻塞式 `Stop` 配置。先在 Codex 设置或 `/hooks` 中关闭该 Hook，再按本指南升级；仅把旧 Hook 从全局改成项目级不能解决问题。
 
 本指南提供的安装器只修改指定的 Codex 用户目录，不修改业务仓库，不复制认证文件，不改变权限或审批策略。
 
@@ -12,16 +14,16 @@ Wave 3 当前的状态是：脚本实现、本地回归和 CLI smoke 已完成�
 
 | 项目 | 默认位置 | 作用 |
 | --- | --- | --- |
-| 用户级配置 | Windows：`%USERPROFILE%\.codex\config.toml`；macOS/Linux：`~/.codex/config.toml` | 增加 `model_auto_compact_token_limit_scope = "total"` 和 `compact_prompt` |
-| 用户级 Hook | Windows：`%USERPROFILE%\.codex\hooks.json`；macOS/Linux：`~/.codex/hooks.json` | 注册 `SessionStart`、`Stop`、`PreCompact`、`PostCompact`、`PreToolUse`、`SubagentStart`、`SubagentStop` |
+| 用户级配置 | Windows：`%USERPROFILE%\.codex\config.toml`；macOS/Linux：`~/.codex/config.toml` | 默认完全保留；只有显式升级参数才移除两条已人工确认的旧安装器压缩覆盖值 |
+| 用户级 Hook | Windows：`%USERPROFILE%\.codex\hooks.json`；macOS/Linux：`~/.codex/hooks.json` | 注册非阻塞的 `SessionStart`、`PreCompact`、`PostCompact`、`PreToolUse`、`SubagentStart`、`SubagentStop`；不注册 `Stop` |
 | 状态目录 | 未设置环境变量时：`~/.codex/context-continuity/sessions` | 保存 `state.json`、checkpoint、hot 状态和生命周期事件 |
 | 备份 | `<CODEX_HOME>/backups/context-continuity-<时间>/` | 保存安装前文件和 `manifest.json`，供安全还原 |
 
 如果设置了 `CODEX_HOME`，配置文件和 Hook 文件以该目录为准。状态目录由 `CODEX_CONTEXT_CONTINUITY_HOME` 单独控制；它没有设置时使用用户 Home 下的默认目录。
 
-自动压缩 token 阈值没有被安装器写死。不同模型和任务的上下文窗口不同，目标环境应先观察实际行为，再决定是否在隔离配置中临时设置 `model_auto_compact_token_limit`。
+安装器不覆盖 `compact_prompt`、压缩 scope 或自动压缩 token 阈值。不同模型和宿主版本的上下文行为不同，应优先使用 Codex 原生默认值；自定义值只在隔离环境验证后手工设置。
 
-官方 OpenAI Docs 的配置参考说明了用户级 `~/.codex/config.toml`、项目级 `.codex/config.toml`、`hooks.json`/`[hooks]` 和自动压缩字段：[Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference#configtoml)。
+官方 OpenAI Docs 说明了用户级 Hook 会跨项目加载、`Stop` 不支持 matcher，以及 `decision: "block"` 会产生 continuation prompt：[Hooks](https://developers.openai.com/codex/hooks)。配置层级见 [Advanced Configuration](https://developers.openai.com/codex/config-file/config-advanced)。
 
 ## 2. 安装前检查
 
@@ -29,7 +31,7 @@ Wave 3 当前的状态是：脚本实现、本地回归和 CLI smoke 已完成�
 
 1. 把本仓库放到固定的绝对路径。全局 `hooks.json` 会写入这个路径，仓库移动后需要重新应用。
 2. 准备 Python 3.10 或更高版本。Windows 优先使用 `py -3`，macOS/Linux 使用 `python3`。
-3. 确认 Codex 已安装，并运行 `codex --strict-config --version` 检查当前配置能被解析。
+3. 确认 Codex 已安装；如果当前版本支持严格配置校验，运行 `codex --strict-config --version`。
 4. 检查目标用户目录中是否已有 `config.toml` 或 `hooks.json`。不要直接复制另一台机器的完整 `config.toml`，其中可能包含代理、Provider 或其他机器专属设置。
 5. 先运行仓库回归：
 
@@ -52,9 +54,10 @@ python3 -m unittest discover -s tests/context_continuity -p 'test_*.py'
 - 从 Wave 3 Fixture 渲染当前仓库的绝对路径；
 - 合并现有 `hooks.json`，保留不相关的用户 Hook；
 - 重复执行时替换本仓库之前安装的 Wave 3 Hook，不产生重复组；
-- 在 `config.toml` 的顶层增加或检查两个压缩配置；
+- 不增加任何全局压缩 prompt、scope 或阈值；只有指定 `--remove-legacy-compact-overrides` 才移除精确旧值；
 - 应用前创建带时间戳的备份和 manifest；
-- 发现用户已有不同的同名压缩配置时停止，除非显式传入 `--force`；
+- 如果多文件写入中途失败，自动回滚到该备份；还原前先验证所有备份源，避免部分还原；
+- 升级时删除本仓库旧版 `Stop` 组，保留其他来源的 Hook；
 - 不设置 `CODEX_CONTEXT_CONTINUITY_HOME`，也不修改认证、权限和审批配置。
 
 ### Windows
@@ -87,7 +90,17 @@ py -3 $installer apply `
   --codex-home "D:\CodexHome"
 ```
 
-命令输出中的 `BACKUP_DIR` 必须保存下来；还原时需要使用它。只有确认现有配置中的同名字段确实应被替换时，才使用 `--force`。
+命令输出中的 `BACKUP_DIR` 必须保存下来；还原时需要使用它。`apply --force` 仅为旧脚本兼容保留，不会覆盖用户自定义压缩设置。
+
+从本仓库旧版全局安装器升级，并且已经确认 `config.toml` 中两条值确由旧安装器写入时，使用：
+
+```powershell
+py -3 $installer apply `
+  --repo-root $repo `
+  --remove-legacy-compact-overrides
+```
+
+macOS/Linux 使用相同参数。安装器无法从相同文本判断配置来源，因此不会默认删除；先检查、再显式确认可以避免误删用户恰好使用同样内容的自定义值。
 
 ### macOS/Linux
 
@@ -155,18 +168,27 @@ py -3 "$repo\tools\context_continuity\install_global.py" `
 
 macOS/Linux 将 `py -3` 换成 `python3`。然后做一个很小的真实任务，观察：
 
-1. `Stop` 是否在没有 checkpoint 时要求一次整理和 seal；
-2. 手动 compact 后，下一轮是否出现 `SessionStart(source=compact)` 恢复入口；
-3. 修改文件或调用工具后，状态是否保持 `dirty`，而不是错误地变成 `safe`；
-4. dirty 状态发生 compact 后，是否提示 `recovery_required` 并要求核对工作区；
-5. 状态目录中是否出现 `state.json`、`events.jsonl`，必要时出现 `emergency.md`；
-6. Hook 是否只记录有限的元数据，没有把 prompt、完整 transcript、密码或 Token 写进状态文件。
+1. 普通回复是否可以直接结束，不出现 checkpoint、seal 或 `<hook_prompt>`；
+2. 新会话和无外部写入的 compact 是否保持安静；
+3. `Read`、搜索、截图等读取型工具是否只记录事件而不把状态标成 `dirty`；
+4. 修改文件、执行不透明 Shell 或调用写入型工具后，状态是否变成 `dirty`；
+5. dirty 状态发生 compact 后，是否进入一次 `recovery_required` 核对，而不是在每轮结束时循环；
+6. 状态目录是否只包含有限元数据，没有 prompt、完整 transcript、密码或 Token。
 
 首次使用时如果宿主要求信任 Hook，应只信任已经检查过的本仓库路径。不要用绕过 Hook 信任或绕过审批的危险选项来“验证成功”。
 
-本仓库已有脚本级证据，但它不替代目标 App 宿主验证：[`W3-local-cli-smoke.md`](../../tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md)。
+本仓库已有修正版脚本级证据，但它不替代目标 App 宿主验证：[`W3-nonblocking-global-smoke.md`](../../tests/context_continuity/evidence/2026-08-08/W3-nonblocking-global-smoke.md)。
 
 ## 6. 安全还原
+
+### 6.0 紧急停用
+
+如果出现循环停止或可见 Hook 提示，先在 Codex 设置或 `/hooks` 中关闭本功能的 Hook，并重启 App。这一步只止血，不改变磁盘配置。随后选择下面之一：
+
+- 用安装器重新 `apply`：升级到当前非阻塞 Hook，并自动备份旧文件；若确认旧压缩覆盖来自本功能，再加 `--remove-legacy-compact-overrides`；
+- 用已有 `BACKUP_DIR` 执行 `restore`：恢复到安装前状态。
+
+不要删除整个 `~/.codex`，也不要覆盖其他用户 Hook。
 
 ### 6.1 还原安装前的配置
 
@@ -252,14 +274,14 @@ $fixture.Replace("<REPO_ROOT>", $repo) |
   Set-Content -LiteralPath $hookPath -Encoding utf8
 ```
 
-此示例把仓库路径转换为 `/`，即使在 Windows 上也能避免 JSON 中未转义反斜杠的问题。手工修改 `config.toml` 时，把以下两个顶层设置放在第一个 `[section]` 之前：
+此示例把仓库路径转换为 `/`，即使在 Windows 上也能避免 JSON 中未转义反斜杠的问题。当前非阻塞配置不要求修改 `config.toml`。如果从旧安装器升级，确认下面两行确由旧安装器写入后，可在备份后移除，或使用显式升级参数：
 
 ```toml
 model_auto_compact_token_limit_scope = "total"
 compact_prompt = "Preserve user corrections, hard constraints, unfinished steps, evidence paths, and the precise next step. Remove logs, source code, and repeated explanations."
 ```
 
-不要把这两行放进 `[desktop]`、`[features]` 或其他表中；不要手工填写未经目标模型实测的 `model_auto_compact_token_limit`。
+不要删除内容不同的用户自定义值；它们不属于安装器可自动判定的旧配置。不要手工填写未经目标模型和宿主实测的 `model_auto_compact_token_limit`。
 
 ## 8. 跨环境注意事项
 
@@ -267,7 +289,8 @@ compact_prompt = "Preserve user corrections, hard constraints, unfinished steps,
 - 如果仓库路径包含空格，保留安装器生成的引号，不要手工删除。
 - 如果 Python 命令不是 `py -3` 或 `python3`，应在 Fixture 的 `command`/`commandWindows` 中改为目标环境的绝对 Python 解释器路径，并重新验证。
 - `CODEX_HOME`、`CODEX_CONTEXT_CONTINUITY_HOME`、模型和 Provider 是环境级设置，不要把个人认证、代理凭据或完整用户配置提交到仓库。
-- 项目级 `.codex/hooks.json` 需要项目被宿主信任；用户级 Hook 会影响该用户的多个项目，必须先做隔离 smoke。
+- 这是通用能力，推荐修复验证后安装在用户级；项目级配置只改变生效范围，不会修复错误的 Hook 语义。
+- 用户级 Hook 会影响该用户的多个项目，因此默认配置必须非阻塞、无 `Stop`，并且变更后需要重新检查 Hook 信任状态。
 - 本能力不改变沙箱、审批、网络或 MCP allowlist。不要为了让 Hook 工作而扩大权限。
 - 同一个状态目录不能被多个并发 session 共享；发生 session/workspace 不匹配时应保留告警，不要强行恢复旧状态。
 
@@ -275,10 +298,13 @@ compact_prompt = "Preserve user corrections, hard constraints, unfinished steps,
 
 | 现象 | 处理 |
 | --- | --- |
-| `apply` 报已有不同的 `compact_prompt` | 先检查现有提示是否有意保留；确认后使用 `--force`，或手工合并。 |
+| 仍出现 `Write a concise checkpoint.md` | 仍加载着旧版 `Stop`。先关闭 Hook，重新运行当前安装器并重启，再检查 `/hooks` 中的来源。 |
 | Hook 没有输出 | 重启 App，检查目标 `hooks.json`、Python 路径和 Hook 信任；先用 `--dry-run`。 |
-| `codex --strict-config` 失败 | 检查 `config.toml` 的表边界和手工插入位置；不要把顶层压缩字段放进其他表。 |
+| `codex --strict-config` 失败 | 检查现有 `config.toml`；当前安装器不会新增压缩字段。 |
 | `restore` 拒绝覆盖 | 目标文件在安装后发生了变化。先保存或检查新改动，再决定是否 `--force`。 |
+| `WinError 5` 指向 `.state.json.*.tmp -> state.json` | 临时文件已创建且重试后恢复时，通常是 Windows 瞬时文件占用，不是扩大权限的理由。更新到包含 session 事务锁和原子替换重试的版本；若持续失败，还需检查目录 ACL，以及杀毒、索引或同步软件是否长期占用状态目录。 |
+| `PreToolUse unavailable ... missing session_id` | 更新到当前脚本。缺少会话身份的观测回调没有安全状态目标，当前版本会安静放行，不再显示警告。 |
+| 只读 `Get-Content` 也把会话标成 `dirty` | 更新到当前脚本。简单且无管道、重定向、命令替换或链式执行的只读 PowerShell cmdlet 不再标脏；复合或未知 Shell 命令仍保持保守。 |
 | 出现 `compact_failed` | 不要假设压缩恢复成功；保留最后安全 checkpoint，检查 `events.jsonl` 和工作区。 |
 | 出现 `recovery_required` | 这是保护状态；先核对文件、测试和产物，再写短 checkpoint 并 seal。 |
 
@@ -288,5 +314,5 @@ compact_prompt = "Preserve user corrections, hard constraints, unfinished steps,
 - [Wave 3 Hook Fixture](../../tests/context_continuity/fixtures/wave3/hooks.example.json)
 - [上下文连续性用户指南](codex-context-continuity.md)
 - [上下文连续性测试说明](../../tests/context_continuity/README.md)
-- [Wave 3 本地 CLI smoke](../../tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md)
+- [Wave 3 非阻塞全局 CLI smoke](../../tests/context_continuity/evidence/2026-08-08/W3-nonblocking-global-smoke.md)
 - [上下文连续性 Wave 计划](../plans/2026-08-07-codex-context-continuity-waves.md)

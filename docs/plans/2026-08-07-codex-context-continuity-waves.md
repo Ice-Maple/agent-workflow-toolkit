@@ -1,5 +1,7 @@
 # Codex 上下文连续性实现 Wave 计划
 
+> 2026-08-08 更正：Wave 1/2 的 `Stop` continuation 仅保留为历史/严格实验路径。真实 App 验证发现用户级 `Stop` 会在每个正常轮次触发，并把 `decision: "block"` 的 reason 显示为用户提示。Wave 3 默认 Fixture 和全局安装器因此改为非阻塞设计：不安装 `Stop`，不覆盖全局 `compact_prompt`，只在真实写入后的压缩或异常恢复中要求核对。安装范围不能替代行为正确性。
+
 - 日期：2026-08-07
 - 状态：执行中（Wave 0 探针、Wave 1 连续性 MVP、Wave 2 非阻止恢复骨架与 Wave 3 机械硬化已实现；宿主 App smoke 待执行）
 - 设计基线：`docs/brainstorms/2026-08-07-codex-context-continuity.md`

@@ -10,11 +10,11 @@
 
 ## 先用一句话理解它
 
-可以把它想成 Agent 的“工作交接本”：
+可以把它想成 Agent 的“压缩恢复记录器”：
 
-- 正常结束一轮工作前，写一页简短交接记录；
+- 正常回复直接结束，不插入额外提示；
 - 如果工作做到一半突然被压缩，先写一张更小的临时便签；
-- 下一次继续工作时，先读交接记录，核对磁盘上的真实结果，再接着做。
+- 只有压缩时存在外部写入或异常状态，才要求核对磁盘结果并恢复。
 
 ## Wave 分别做什么
 
@@ -25,19 +25,19 @@ Wave 是开发阶段，不是需要用户切换的四种模式。
 | Wave 0 | 只观察 Codex App 什么时候发送生命周期事件，不改变任务行为。 | 已完成，主要用于宿主验证 |
 | Wave 1 | 每轮结束时保存一份 checkpoint，下一轮或压缩后恢复。 | 已完成 |
 | Wave 2 | 处理中途压缩：保存紧急便签，压缩后要求核对并恢复。 | 已完成，当前初步可用版本 |
-| Wave 3 | 让工具调用和子 Agent 自动标记“工作是否变脏”，并限制恢复信息的大小。 | 已完成脚本级实现，真实 App smoke 待验证 |
+| Wave 3 | 让工具调用和子 Agent 自动标记“工作是否变脏”，限制恢复信息大小，并提供非阻塞全局配置。 | 已完成脚本级实现与本地回归，真实 App smoke 待验证 |
 | Wave 4 | 用真实任务统计效果；只有确实需要时，才考虑精确安排压缩时机。 | 计划中 |
 
 日常使用至少需要 Wave 2；如果希望工具调用和子 Agent 也自动参与状态判断，可以改用 Wave 3 Fixture。Wave 0 不需要一直开启，Wave 4 仍是计划中的评测与调度阶段。
 
 ## 当前版本能做什么
 
-### 正常的一轮工作
+### 正常的一轮工作（Wave 3 默认配置）
 
-1. Codex 结束一轮工作时，`Stop` Hook 检查是否有安全 checkpoint。
-2. 如果没有，最多要求一次“只整理 checkpoint，不重新执行业务工作”的 continuation。
-3. 模型写好 `checkpoint.md` 后，运行注入的 seal 命令。
-4. seal 成功后，这一轮状态变成 `safe`，可以正常结束。
+1. 不注册 `Stop` Hook，普通回复直接结束。
+2. `PreToolUse` 只记录有限元数据；明确的读取型工具不会标脏。
+3. 写入型、未知或不透明 Shell 工具会把状态标成 `dirty`；只有单条、无管道/重定向/命令替换且位于窄白名单内的只读 PowerShell 命令（例如简单 `Get-Content`）不会标脏。
+4. checkpoint/seal 保留为恢复和显式保存机制，不再是每轮结束的强制步骤。
 
 ### 压缩发生在中途
 
@@ -53,14 +53,14 @@ Wave 是开发阶段，不是需要用户切换的四种模式。
 
 Wave 3 不改变上面的“允许压缩”策略，只把几个容易依赖模型自觉的地方变成机械记录：
 
-- `PreToolUse` 在工具真正执行前记录工具名和类别；写入工具、只读证据工具和未知工具都会让状态保持 `dirty`，只有 `inspect` 这种状态查询不改变状态；
+- `PreToolUse` 在工具真正执行前记录工具名和类别；写入、未知和复合 Shell 工具会标记 `dirty`，明确的读取/证据工具和可机械证明的简单只读 PowerShell 命令只记录事件，不制造恢复义务；缺少 `session_id` 的宿主回调没有安全的状态目标，因此会安静放行；
 - `SubagentStart`/`SubagentStop` 记录子 Agent 是否仍在运行。根 Agent 不能因为子 Agent 返回了结果就自动变成 `safe`，必须先核对结果、更新 checkpoint 并 seal；
 - seal 时分别检查小的 `hot.md` 和较完整的 `checkpoint.md`，超出预算就报可修复错误，不静默截断；
 - 压缩后优先注入 hot 状态；较大的 warm checkpoint 只保留磁盘路径，避免恢复内容本身再次挤满上下文。
 
 ## 如何初步使用
 
-建议先在临时 workspace 中验证，不要立即写入全局 `~/.codex/hooks.json`。
+修正版 Wave 3 是通用能力，验证后可安装到用户级 `~/.codex/hooks.json`；项目级与用户级只影响生效范围，不改变功能正确性。
 
 如果验证通过后要在其他机器或用户环境中重复安装、备份和还原，请使用[跨环境配置与还原指南](codex-context-continuity-global-setup.md)及其安装器；全局安装是明确的用户操作，不会由本功能自动执行。
 
@@ -73,7 +73,7 @@ cd E:\projects\agent-workflow-toolkit
 python -m unittest discover -s tests/context_continuity -p "test_*.py"
 ```
 
-当前仓库还提供了本地 CLI smoke 证据：[W2-local-cli-smoke.md](../../tests/context_continuity/evidence/2026-08-07/W2-local-cli-smoke.md) 和 [W3-local-cli-smoke.md](../../tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md)。两者都是脚本级证据，不等同于真实 Codex App 宿主验证。
+当前仓库还提供了本地 CLI smoke 证据：[W2-local-cli-smoke.md](../../tests/context_continuity/evidence/2026-08-07/W2-local-cli-smoke.md) 和 [W3-nonblocking-global-smoke.md](../../tests/context_continuity/evidence/2026-08-08/W3-nonblocking-global-smoke.md)。两者都是脚本级证据，不等同于真实 Codex App 宿主验证。
 
 ### 2. 创建隔离的 Hook 配置
 
@@ -101,11 +101,11 @@ $env:CODEX_CONTEXT_CONTINUITY_HOME = Join-Path $smokeRoot "state"
 
 可以让 Codex 完成一个包含“读取、修改、测试”的小任务，然后观察：
 
-1. 第一次 Stop 是否要求写 checkpoint；
-2. checkpoint seal 后是否可以正常结束；
-3. 手动 compact 后，下一次请求是否看到原来的目标和下一步；
-4. dirty 状态下 compact 后，是否先提示 `recovery_required`，而不是直接重复执行；
-5. `%TEMP%\codex-context-continuity-app-smoke\state` 下是否出现 `state.json`、`events.jsonl` 和必要时的 `emergency.md`。
+1. 普通回复是否直接结束，不出现 checkpoint/seal continuation；
+2. 新会话和只读操作后的 compact 是否保持安静；
+3. 写入操作后状态是否变成 `dirty`；
+4. dirty 状态下 compact 后，是否只进入一次 `recovery_required` 核对；
+5. `%TEMP%\codex-context-continuity-app-smoke\state` 下是否出现有限的 `state.json`、`events.jsonl` 和必要时的 `emergency.md`。
 
 如果只想先验证 Wave 2，可以把上面的 `wave3` 改成 `wave2`。Wave 3 还应额外观察 `PreToolUse`、`SubagentStart` 和 `SubagentStop` 事件，以及 `hot.md` 是否保持很小。
 
@@ -137,6 +137,7 @@ checkpoint 的目的不是保存聊天记录，而是让下一次 Agent 能准�
 
 | 状态 | 通俗解释 | 该怎么做 |
 | --- | --- | --- |
+| `clean` | 尚无需要额外恢复的外部写入，也没有强制 checkpoint。 | 正常工作；原生压缩可以直接进行。 |
 | `safe` | 重要进度已经保存并验证过。 | 可以继续正常工作或压缩。 |
 | `dirty` | 最近做过工作，但 checkpoint 可能还没包含最新结果。 | 先整理 checkpoint，避免把新结果漏掉。 |
 | `compacting` | 压缩已经开始，正在等待压缩后的入口。 | 不要开始新的正式业务工作，等待恢复事件。 |
@@ -156,13 +157,14 @@ Wave 2 Fixture 配置了四类 Hook：
 
 配置模板是 [wave2/hooks.example.json](../../tests/context_continuity/fixtures/wave2/hooks.example.json)。模板中的 `<REPO_ROOT>` 必须替换为仓库绝对路径。
 
-Wave 3 Fixture 在此基础上增加：
+Wave 3 Fixture 使用非阻塞全局语义：
 
+- 不包含 `Stop`；升级安装会删除本仓库旧版 `Stop` 组；
 - `PreToolUse`：记录工具类别和 dirty 状态；
 - `SubagentStart`/`SubagentStop`：记录根 session 下的子 Agent 生命周期；
 - `SessionStart` 的 `additionalContextLimit=800`：给 hot 状态和固定恢复提示留出空间。
 
-配置模板是 [wave3/hooks.example.json](../../tests/context_continuity/fixtures/wave3/hooks.example.json)。Hook 只记录机械状态，不返回工具调用的阻止决定，也不会自动替根 Agent seal。
+配置模板是 [wave3/hooks.example.json](../../tests/context_continuity/fixtures/wave3/hooks.example.json)。Hook 只记录机械状态，不返回正常轮次的阻止决定，也不会自动替根 Agent seal。
 
 ### `CODEX_CONTEXT_CONTINUITY_HOME`
 
@@ -200,7 +202,7 @@ Wave 2 的 SessionStart Fixture 使用 `1200`；Wave 3 使用 `800`，因为 Wav
 
 ### `compact_prompt`
 
-它可以作为额外提示，要求原生摘要保留用户纠正、硬约束、未完成步骤和证据路径，并删除日志、源码和重复解释。但它不能替代外部 checkpoint，也不能保证模型一定记住所有关键事实。
+当前安装器不再写入全局 `compact_prompt`。旧版安装器写入的精确默认值只有在显式传入 `--remove-legacy-compact-overrides` 后才会移除；默认保留所有用户配置。原因是宿主可能把自定义压缩提示显示到会话中，而且安装器无法仅凭相同文本证明配置来源。
 
 ## 安全和隐私
 
@@ -213,9 +215,9 @@ Wave 2 的 SessionStart Fixture 使用 `1200`；Wave 3 使用 `800`，因为 Wav
 
 ## 常见情况
 
-### Stop 一直要求 seal
+### 出现 `Write a concise checkpoint.md` 或 `<hook_prompt>`
 
-检查模型是否真的写入了注入路径中的 `checkpoint.md`，并执行了同一段提示中的 seal 命令。错误 turn、错误 workspace 或 checkpoint 超限都会导致 seal 失败。
+说明仍加载着旧版阻塞式 `Stop`。先在设置或 `/hooks` 中关闭它，运行当前安装器升级 `hooks.json`，重启 App 后再核对 Hook 来源。把同一 Hook 移到项目级不能解决循环。
 
 ### 出现 `recovery_required`
 
@@ -224,6 +226,14 @@ Wave 2 的 SessionStart Fixture 使用 `1200`；Wave 3 使用 `800`，因为 Wav
 ### 出现 `compact_failed`
 
 说明系统没有看到预期的 `SessionStart(source=compact)`。不要假设上下文已经正确压缩；先保留最后安全 checkpoint，查看 `events.jsonl`，必要时重新启动隔离任务。
+
+### 出现 `PreToolUse unavailable ... missing session_id`
+
+这是旧版脚本把宿主的不完整观测回调显示成了警告。当前版本会安静放行并跳过记录；如果仍看到该消息，检查 Hook 实际引用的脚本路径并更新到当前版本。
+
+### 只读 `Get-Content` 后仍进入 `recovery_required`
+
+旧版策略把所有 `Bash`/PowerShell 调用都保守标脏。当前版本只对语法简单、可机械证明为只读的 PowerShell cmdlet 降级为读取；带管道、重定向、命令替换、链式执行或未知语法的 Shell 命令仍保持 `dirty`。
 
 ### Hook 没有输出任何内容
 

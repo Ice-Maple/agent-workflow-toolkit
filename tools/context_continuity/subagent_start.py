@@ -35,7 +35,7 @@ def _payload() -> dict[str, Any]:
 
 
 def _emit(value: dict[str, Any]) -> None:
-    json.dump(value, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    json.dump(value, sys.stdout, ensure_ascii=True, separators=(",", ":"))
     sys.stdout.write("\n")
 
 

@@ -1,11 +1,11 @@
-"""Install and restore the Wave 3 Codex context-continuity configuration.
+"""Install and restore the non-blocking Wave 3 context-continuity hooks.
 
 The installer is deliberately conservative:
 
 * it merges Wave 3 hook groups instead of replacing unrelated hooks;
-* it refuses to replace different top-level compaction settings unless
-  ``--force`` is supplied;
+* it removes exact legacy compaction lines only after explicit confirmation;
 * every apply creates a timestamped backup and a manifest;
+* a failed multi-file apply rolls back to that snapshot;
 * restore refuses to overwrite files changed after the apply unless
   ``--force`` is supplied.
 
@@ -35,7 +35,7 @@ COMPACT_PROMPT_LINE = (
     'unfinished steps, evidence paths, and the precise next step. Remove '
     'logs, source code, and repeated explanations."'
 )
-CONFIG_KEYS = {
+LEGACY_CONFIG_LINES = {
     "model_auto_compact_token_limit_scope": COMPACT_SCOPE_LINE,
     "compact_prompt": COMPACT_PROMPT_LINE,
 }
@@ -157,13 +157,31 @@ def load_wave3_hooks(repo_root: Path) -> dict[str, Any]:
     return rendered
 
 
-def is_wave3_hook_group(group: Any) -> bool:
+def is_wave3_hook_handler(handler: Any) -> bool:
     try:
-        serialized = json.dumps(group, ensure_ascii=False).replace("\\", "/")
+        serialized = json.dumps(handler, ensure_ascii=False).replace("\\", "/")
     except (TypeError, ValueError):
         return False
     serialized = re.sub(r"/+", "/", serialized)
     return WAVE3_SCRIPT_MARKER in serialized
+
+
+def prune_wave3_handlers(group: Any) -> dict[str, Any] | None:
+    """Remove only this capability's handlers, preserving a mixed group."""
+
+    if not isinstance(group, dict):
+        return copy.deepcopy(group)
+    handlers = group.get("hooks")
+    if not isinstance(handlers, list):
+        return copy.deepcopy(group)
+    retained = [handler for handler in handlers if not is_wave3_hook_handler(handler)]
+    if len(retained) == len(handlers):
+        return copy.deepcopy(group)
+    if not retained:
+        return None
+    result = copy.deepcopy(group)
+    result["hooks"] = retained
+    return result
 
 
 def merge_hooks(existing: dict[str, Any] | None, wave3: dict[str, Any]) -> dict[str, Any]:
@@ -172,17 +190,32 @@ def merge_hooks(existing: dict[str, Any] | None, wave3: dict[str, Any]) -> dict[
     if not isinstance(existing_hooks, dict):
         raise ConfigurationError("Existing hooks.json has a non-object 'hooks' value")
 
+    # First prune every group previously installed by this repository. This is
+    # intentionally broader than the new fixture's event list so upgrades can
+    # remove retired events such as the blocking Stop hook.
+    for event_name, current_groups in list(existing_hooks.items()):
+        if not isinstance(current_groups, list):
+            raise ConfigurationError(f"Existing hook event is not an array: {event_name}")
+        preserved = [
+            retained
+            for group in current_groups
+            if (retained := prune_wave3_handlers(group)) is not None
+        ]
+        if preserved:
+            existing_hooks[event_name] = preserved
+        else:
+            existing_hooks.pop(event_name, None)
+
     wave3_hooks = wave3["hooks"]
     for event_name, groups in wave3_hooks.items():
         if not isinstance(groups, list):
             raise ConfigurationError(f"Wave 3 event is not an array: {event_name}")
         current_groups = existing_hooks.get(event_name, [])
-        if not isinstance(current_groups, list):
-            raise ConfigurationError(f"Existing hook event is not an array: {event_name}")
-        preserved = [group for group in current_groups if not is_wave3_hook_group(group)]
-        existing_hooks[event_name] = preserved + copy.deepcopy(groups)
+        existing_hooks[event_name] = copy.deepcopy(current_groups) + copy.deepcopy(groups)
 
-    merged.setdefault("description", wave3.get("description", "Wave 3 context continuity hooks"))
+    description = merged.get("description")
+    if not isinstance(description, str) or description.startswith("Wave 3 "):
+        merged["description"] = wave3.get("description", "Wave 3 context continuity hooks")
     return merged
 
 
@@ -197,47 +230,13 @@ def _top_level_prefix_lines(text: str) -> tuple[list[str], list[str]]:
     return lines[:first_table], lines[first_table:]
 
 
-def upsert_config_settings(text: str, *, force: bool) -> str:
+def remove_legacy_managed_config_settings(text: str) -> str:
+    """Remove exact legacy lines without touching user-authored alternatives."""
+
     prefix, suffix = _top_level_prefix_lines(text)
-    newline = "\r\n" if "\r\n" in text else "\n"
-    prefix_text = "".join(prefix)
-
-    for key, desired_line in CONFIG_KEYS.items():
-        matches = [
-            index
-            for index, line in enumerate(prefix)
-            if re.match(rf"^\s*{re.escape(key)}\s*=", line)
-        ]
-        if len(matches) > 1:
-            raise ConfigurationError(f"Duplicate top-level setting in config.toml: {key}")
-        if not matches:
-            continue
-        index = matches[0]
-        current_line = prefix[index].strip()
-        if '"""' in current_line or "'''" in current_line:
-            raise ConfigurationError(
-                f"Multiline setting requires manual review before updating: {key}"
-            )
-        if current_line != desired_line:
-            if not force:
-                raise ConfigurationError(
-                    f"config.toml already defines a different {key}; "
-                    "review it or rerun with --force"
-                )
-            prefix[index] = desired_line + newline
-
-    missing = [
-        desired_line
-        for key, desired_line in CONFIG_KEYS.items()
-        if not any(re.match(rf"^\s*{re.escape(key)}\s*=", line) for line in prefix)
-    ]
-    if missing:
-        if prefix and prefix[-1].strip():
-            prefix.append(newline)
-        prefix.extend(line + newline for line in missing)
-        prefix.append(newline)
-
-    return "".join(prefix + suffix)
+    legacy_values = set(LEGACY_CONFIG_LINES.values())
+    retained = [line for line in prefix if line.strip() not in legacy_values]
+    return "".join(retained + suffix)
 
 
 def create_backup(codex_home: Path, paths: dict[str, Path], repo_root: Path) -> tuple[Path, dict[str, Any]]:
@@ -267,6 +266,7 @@ def create_backup(codex_home: Path, paths: dict[str, Path], repo_root: Path) -> 
 
     manifest = {
         "version": 1,
+        "status": "prepared",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "repo_root": str(repo_root),
         "codex_home": str(codex_home),
@@ -275,11 +275,50 @@ def create_backup(codex_home: Path, paths: dict[str, Path], repo_root: Path) -> 
     return backup_dir, manifest
 
 
+def _restore_snapshot_files(
+    backup_dir: Path,
+    target_home: Path,
+    files: dict[str, Any],
+) -> None:
+    """Validate every source first, then restore the two managed targets."""
+
+    actions: list[tuple[Path, Path | None, bool]] = []
+    for name in HOOK_FILE_NAMES:
+        details = files.get(name)
+        if not isinstance(details, dict):
+            raise ConfigurationError(f"Backup manifest is missing {name}")
+        target = target_home / name
+        ensure_safe_target(target)
+        existed_before = bool(details.get("existed_before"))
+        source: Path | None = None
+        if existed_before:
+            backup_name = details.get("backup_name")
+            if not isinstance(backup_name, str):
+                raise ConfigurationError(f"Backup entry has no source file: {name}")
+            source = backup_dir / backup_name
+            if not source.is_file():
+                raise ConfigurationError(f"Backup file not found: {source}")
+            expected_hash = details.get("before_sha256")
+            if not isinstance(expected_hash, str) or sha256_file(source) != expected_hash:
+                raise ConfigurationError(f"Backup file hash does not match manifest: {source}")
+        actions.append((target, source, existed_before))
+
+    for target, source, existed_before in actions:
+        if existed_before:
+            assert source is not None
+            atomic_copy_file(source, target)
+        elif target.exists():
+            if not target.is_file():
+                raise ConfigurationError(f"Refusing to remove non-file target: {target}")
+            target.unlink()
+
+
 def apply_global(
     repo_root: Path,
     codex_home: Path,
     *,
     force: bool = False,
+    remove_legacy_compact_overrides: bool = False,
     dry_run: bool = False,
 ) -> Path | None:
     repo_root = repo_root.resolve()
@@ -291,7 +330,15 @@ def apply_global(
         ensure_safe_target(path)
 
     config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    updated_config = upsert_config_settings(config_text, force=force)
+    # ``force`` remains in the public function/CLI for compatibility with the
+    # first installer release. The non-blocking installer never overwrites a
+    # user-authored compaction setting.
+    _ = force
+    updated_config = (
+        remove_legacy_managed_config_settings(config_text)
+        if remove_legacy_compact_overrides
+        else config_text
+    )
 
     existing_hooks: dict[str, Any] | None = None
     if hooks_path.exists():
@@ -309,19 +356,41 @@ def apply_global(
         print(f"CODEX_HOME={codex_home}")
         print(f"CONFIG_TARGET={config_path}")
         print(f"HOOKS_TARGET={hooks_path}")
+        print(f"REMOVE_LEGACY_COMPACT_OVERRIDES={remove_legacy_compact_overrides}")
         print("DRY_RUN=True")
         return None
 
     codex_home.mkdir(parents=True, exist_ok=True)
     backup_dir, manifest = create_backup(codex_home, paths, repo_root)
-    atomic_write_text(config_path, updated_config)
-    atomic_write_text(hooks_path, updated_hooks_text)
-    manifest["files"]["config.toml"]["after_sha256"] = sha256_file(config_path)
-    manifest["files"]["hooks.json"]["after_sha256"] = sha256_file(hooks_path)
-    atomic_write_text(
-        backup_dir / "manifest.json",
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-    )
+    manifest_path = backup_dir / "manifest.json"
+    atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    try:
+        if config_path.exists() or updated_config:
+            atomic_write_text(config_path, updated_config)
+        atomic_write_text(hooks_path, updated_hooks_text)
+        manifest["files"]["config.toml"]["after_sha256"] = sha256_file(config_path)
+        manifest["files"]["hooks.json"]["after_sha256"] = sha256_file(hooks_path)
+        manifest["status"] = "applied"
+        atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    except (OSError, ConfigurationError) as exc:
+        manifest["files"]["config.toml"]["after_sha256"] = sha256_file(config_path)
+        manifest["files"]["hooks.json"]["after_sha256"] = sha256_file(hooks_path)
+        manifest["status"] = "partial"
+        try:
+            atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        except OSError:
+            pass
+        try:
+            _restore_snapshot_files(backup_dir, codex_home, manifest["files"])
+            manifest["files"]["config.toml"]["after_sha256"] = sha256_file(config_path)
+            manifest["files"]["hooks.json"]["after_sha256"] = sha256_file(hooks_path)
+            manifest["status"] = "rolled_back"
+            atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        except (OSError, ConfigurationError) as rollback_exc:
+            raise ConfigurationError(
+                f"Apply failed and rollback was incomplete; inspect {backup_dir}: {rollback_exc}"
+            ) from exc
+        raise ConfigurationError(f"Apply failed and was rolled back; backup: {backup_dir}: {exc}") from exc
     print(f"BACKUP_DIR={backup_dir}")
     print(f"CONFIG_TARGET={config_path}")
     print(f"HOOKS_TARGET={hooks_path}")
@@ -373,13 +442,8 @@ def restore_global(
             )
         actions.append((name, target, details))
 
-    if dry_run:
-        print(f"BACKUP_DIR={backup_dir}")
-        print(f"CODEX_HOME={target_home}")
-        print("DRY_RUN=True")
-        return
-
-    for name, target, details in actions:
+    # Validate all backup sources and hashes before mutating either target.
+    for name, _, details in actions:
         if details.get("existed_before"):
             backup_name = details.get("backup_name")
             if not isinstance(backup_name, str):
@@ -387,11 +451,42 @@ def restore_global(
             source = backup_dir / backup_name
             if not source.is_file():
                 raise ConfigurationError(f"Backup file not found: {source}")
-            atomic_copy_file(source, target)
-        elif target.exists():
-            if not target.is_file():
-                raise ConfigurationError(f"Refusing to remove non-file target: {target}")
-            target.unlink()
+            expected_before = details.get("before_sha256")
+            if not isinstance(expected_before, str) or sha256_file(source) != expected_before:
+                raise ConfigurationError(f"Backup file hash does not match manifest: {source}")
+
+    if dry_run:
+        print(f"BACKUP_DIR={backup_dir}")
+        print(f"CODEX_HOME={target_home}")
+        print("DRY_RUN=True")
+        return
+
+    target_home.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".context-continuity-restore-", dir=target_home) as rollback_raw:
+        rollback_dir = Path(rollback_raw)
+        rollback_files: dict[str, Any] = {}
+        for name in HOOK_FILE_NAMES:
+            target = target_home / name
+            current_hash = sha256_file(target)
+            existed = current_hash is not None
+            if existed:
+                atomic_copy_file(target, rollback_dir / name)
+            rollback_files[name] = {
+                "target_name": name,
+                "existed_before": existed,
+                "before_sha256": current_hash,
+                "backup_name": name if existed else None,
+            }
+        try:
+            _restore_snapshot_files(backup_dir, target_home, files)
+        except (OSError, ConfigurationError) as exc:
+            try:
+                _restore_snapshot_files(rollback_dir, target_home, rollback_files)
+            except (OSError, ConfigurationError) as rollback_exc:
+                raise ConfigurationError(
+                    f"Restore failed and rollback was incomplete: {rollback_exc}"
+                ) from exc
+            raise ConfigurationError(f"Restore failed and was rolled back: {exc}") from exc
 
     print(f"BACKUP_DIR={backup_dir}")
     print(f"CODEX_HOME={target_home}")
@@ -407,7 +502,16 @@ def build_parser() -> argparse.ArgumentParser:
     apply_parser = subparsers.add_parser("apply", help="merge and install the global settings")
     apply_parser.add_argument("--repo-root", help="repository root; defaults to this repository")
     apply_parser.add_argument("--codex-home", help="Codex home; defaults to CODEX_HOME or ~/.codex")
-    apply_parser.add_argument("--force", action="store_true", help="replace conflicting compaction settings")
+    apply_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="compatibility flag; user-authored compaction settings are never overwritten",
+    )
+    apply_parser.add_argument(
+        "--remove-legacy-compact-overrides",
+        action="store_true",
+        help="remove exact compact settings written by the legacy installer after review",
+    )
     apply_parser.add_argument("--dry-run", action="store_true", help="show targets without writing")
 
     restore_parser = subparsers.add_parser("restore", help="restore a backup created by apply")
@@ -432,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
                 repo_root,
                 codex_home,
                 force=args.force,
+                remove_legacy_compact_overrides=args.remove_legacy_compact_overrides,
                 dry_run=args.dry_run,
             )
         else:

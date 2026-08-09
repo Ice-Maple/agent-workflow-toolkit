@@ -10,8 +10,12 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any
+from functools import wraps
+from typing import Any, Callable, Iterator, TypeVar
 import unicodedata
 
 
@@ -24,8 +28,12 @@ MAX_WARM_ESTIMATED_TOKENS = 1500
 MAX_EMERGENCY_ESTIMATED_TOKENS = 250
 MAX_ACTIVE_SUBAGENTS = 16
 MAX_TOOL_NAME_CHARS = 256
+SESSION_LOCK_TIMEOUT_SECONDS = 2.0
+ATOMIC_REPLACE_ATTEMPTS = 6
+ATOMIC_REPLACE_INITIAL_DELAY_SECONDS = 0.02
 TOOL_CATEGORIES = {"write", "read_evidence", "state", "unknown"}
 VALID_STATUSES = {
+    "clean",
     "dirty",
     "safe",
     "compacting",
@@ -44,6 +52,179 @@ SECRET_PATTERNS = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
 
+_PROCESS_LOCKS: dict[str, threading.RLock] = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
+_HELD_SESSION_LOCKS = threading.local()
+_SessionOperation = TypeVar(
+    "_SessionOperation",
+    bound=Callable[..., tuple[Path | None, dict[str, Any] | None, str | None]],
+)
+
+
+def _escape_surrogates(text: str) -> str:
+    """Render invalid standalone UTF-16 code units as reversible ASCII escapes."""
+
+    return "".join(
+        f"\\u{ord(character):04x}" if 0xD800 <= ord(character) <= 0xDFFF else character
+        for character in text
+    )
+
+
+def _process_lock_for(key: str) -> threading.RLock:
+    with _PROCESS_LOCKS_GUARD:
+        return _PROCESS_LOCKS.setdefault(key, threading.RLock())
+
+
+def _lock_file_nonblocking(stream: Any) -> None:
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(stream: Any) -> None:
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _is_lock_busy_error(exc: OSError) -> bool:
+    return (
+        isinstance(exc, BlockingIOError)
+        or exc.errno in (11, 13, 35)
+        or getattr(exc, "winerror", None) in (32, 33, 36)
+    )
+
+
+@contextmanager
+def session_state_lock(
+    session_dir: Path,
+    *,
+    timeout: float = SESSION_LOCK_TIMEOUT_SECONDS,
+) -> Iterator[None]:
+    """Serialize a session's full state transaction across threads and processes."""
+
+    resolved = session_dir.expanduser().resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    key = os.path.normcase(str(resolved))
+    process_lock = _process_lock_for(key)
+    deadline = time.monotonic() + max(0.0, timeout)
+    if not process_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise TimeoutError(
+            f"timed out after {timeout:.2f}s waiting for in-process session state lock: {resolved}"
+        )
+    try:
+        held = getattr(_HELD_SESSION_LOCKS, "depth", None)
+        if held is None:
+            held = {}
+            _HELD_SESSION_LOCKS.depth = held
+        if held.get(key, 0):
+            held[key] += 1
+            try:
+                yield
+            finally:
+                held[key] -= 1
+            return
+
+        lock_path = resolved / ".state.lock"
+        with lock_path.open("a+b") as stream:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"\0")
+                stream.flush()
+            try:
+                os.chmod(lock_path, 0o600)
+            except OSError:
+                pass
+
+            while True:
+                try:
+                    _lock_file_nonblocking(stream)
+                    break
+                except OSError as exc:
+                    if not _is_lock_busy_error(exc) or time.monotonic() >= deadline:
+                        if _is_lock_busy_error(exc):
+                            raise TimeoutError(
+                                f"timed out after {timeout:.2f}s waiting for session state lock: {lock_path}"
+                            ) from exc
+                        raise
+                    time.sleep(0.02)
+
+            held[key] = 1
+            try:
+                yield
+            finally:
+                held.pop(key, None)
+                _unlock_file(stream)
+    finally:
+        process_lock.release()
+
+
+def _locked_session_operation(function: _SessionOperation) -> _SessionOperation:
+    """Wrap state APIs whose first argument is a session id."""
+
+    @wraps(function)
+    def wrapper(
+        session_id: str | None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> tuple[Path | None, dict[str, Any] | None, str | None]:
+        if not isinstance(session_id, str) or not session_id:
+            return function(session_id, *args, **kwargs)
+        session_dir: Path | None = None
+        try:
+            session_dir = session_directory(session_id)
+            with session_state_lock(session_dir):
+                return function(session_id, *args, **kwargs)
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            return session_dir, None, f"cannot lock session state: {exc}"
+
+    return wrapper  # type: ignore[return-value]
+
+
+def _locked_session_directory_operation(
+    function: Callable[..., tuple[int, dict[str, Any]]],
+) -> Callable[..., tuple[int, dict[str, Any]]]:
+    """Wrap state APIs whose first argument is an already resolved session directory."""
+
+    @wraps(function)
+    def wrapper(session_dir: Path, *args: Any, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+        try:
+            with session_state_lock(session_dir):
+                return function(session_dir, *args, **kwargs)
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            return 4, {"status": "error", "reason": f"cannot lock session state: {exc}"}
+
+    return wrapper
+
+
+def _is_retryable_replace_error(exc: OSError) -> bool:
+    return os.name == "nt" and getattr(exc, "winerror", None) in (5, 32, 33)
+
+
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    delay = ATOMIC_REPLACE_INITIAL_DELAY_SECONDS
+    for attempt in range(ATOMIC_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            if attempt + 1 >= ATOMIC_REPLACE_ATTEMPTS or not _is_retryable_replace_error(exc):
+                raise
+            time.sleep(delay)
+            delay *= 2
+
 
 def digest(value: Any) -> str | None:
     if value is None:
@@ -51,7 +232,11 @@ def digest(value: Any) -> str | None:
     text = str(value)
     if not text:
         return None
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    # Hook JSON can legally decode an unpaired ``\\udxxx`` escape into a Python
+    # string even though strict UTF-8 cannot encode it. ``surrogatepass`` keeps
+    # those code units distinct for hashing while leaving all valid Unicode
+    # hashes unchanged.
+    return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
 
 
 def context_home() -> Path:
@@ -119,10 +304,10 @@ def _atomic_write_text(path: Path, content: str) -> None:
             delete=False,
         ) as stream:
             temporary = Path(stream.name)
-            stream.write(content)
+            stream.write(_escape_surrogates(content))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _replace_with_retry(temporary, path)
         try:
             os.chmod(path, 0o600)
         except OSError:
@@ -458,9 +643,24 @@ def _normalize_wave3_state(state: dict[str, Any]) -> bool:
         if key not in state:
             state[key] = list(value) if isinstance(value, list) else value
             changed = True
+    # Early Wave 3 initialized every session as dirty even when no tool or
+    # external mutation had occurred. Migrate only that pristine shape; any
+    # real pending turn, dirty reason, tool, or subagent remains untouched.
+    if (
+        state.get("status") == "dirty"
+        and state.get("checkpoint_seq", 0) == 0
+        and state.get("pending_turn_hash") is None
+        and state.get("dirty_generation", 0) == 0
+        and state.get("last_dirty_reason") is None
+        and state.get("last_tool_name") is None
+        and not state.get("active_subagents")
+    ):
+        state["status"] = "clean"
+        changed = True
     return changed
 
 
+@_locked_session_operation
 def ensure_session(
     session_id: str | None,
     cwd: str | Path | None,
@@ -500,7 +700,7 @@ def ensure_session(
             "session_id_hash": session_hash,
             "workspace_hash": workspace_hash,
             "workspace_name": workspace_name,
-            "status": "dirty",
+            "status": "clean",
             "checkpoint_seq": 0,
             "checkpoint_hash": None,
             "checkpoint_chars": 0,
@@ -560,6 +760,7 @@ def ensure_session(
     return session_dir, state, None
 
 
+@_locked_session_operation
 def mark_turn_dirty(
     session_id: str | None,
     cwd: str | Path | None,
@@ -613,7 +814,7 @@ def _tool_input_digest(tool_input: Any) -> str | None:
     if tool_input is None:
         return None
     try:
-        serialized = json.dumps(tool_input, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        serialized = json.dumps(tool_input, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError):
         serialized = str(tool_input)
     return digest(serialized)
@@ -649,6 +850,7 @@ def _persist_tool_event(
     )
 
 
+@_locked_session_operation
 def record_tool_use(
     session_id: str | None,
     cwd: str | Path | None,
@@ -656,10 +858,11 @@ def record_tool_use(
     tool_name: str | None,
     category: str,
     *,
+    marks_dirty: bool | None = None,
     tool_use_id: str | None = None,
     tool_input: Any = None,
 ) -> tuple[Path | None, dict[str, Any] | None, str | None]:
-    """Record a PreToolUse observation and conservatively mark the root dirty."""
+    """Record a PreToolUse observation and mark only mutating work dirty."""
 
     session_dir, state, error = ensure_session(session_id, cwd, source="pretooluse")
     if error or session_dir is None or state is None:
@@ -668,11 +871,16 @@ def record_tool_use(
         return session_dir, state, "missing turn_id"
     if category not in TOOL_CATEGORIES:
         return session_dir, state, "invalid tool category"
+    if marks_dirty is not None and not isinstance(marks_dirty, bool):
+        return session_dir, state, "invalid marks_dirty"
 
     normalized_name = _safe_tool_name(tool_name)
     turn_hash = digest(turn_id)
     operation_name = re.split(r"(?:__|[.:/\\])", normalized_name.lower())[-1]
-    marks_dirty = not (category == "state" and operation_name == "inspect")
+    if marks_dirty is None:
+        marks_dirty = category not in ("read_evidence",) and not (
+            category == "state" and operation_name == "inspect"
+        )
     state_changed = False
 
     # A PreToolUse callback can race a compact callback. Preserve the compact
@@ -754,6 +962,7 @@ def _record_subagent_event(
     )
 
 
+@_locked_session_operation
 def mark_subagent_started(
     session_id: str | None,
     cwd: str | Path | None,
@@ -823,6 +1032,7 @@ def mark_subagent_started(
     return session_dir, state, f"subagent event evidence failed: {event_error}" if event_error else None
 
 
+@_locked_session_operation
 def mark_subagent_stopped(
     session_id: str | None,
     cwd: str | Path | None,
@@ -933,7 +1143,8 @@ def append_event(session_dir: Path, event: dict[str, Any]) -> str | None:
         session_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(session_dir, 0o700)
         with path.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            serialized = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+            stream.write(_escape_surrogates(serialized) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
         try:
@@ -953,6 +1164,9 @@ def sanitize_pointer(value: Any, limit: int, *, always_hash: bool = False) -> st
     text = str(value).replace("\r", " ").replace("\n", " ").replace("\x00", " ")
     if always_hash or has_secret(text):
         return f"pointer:{digest(text)}"
+    # Preserve the original value in memory so JSON can distinguish a real
+    # surrogate from a literal ``\\udcba`` sequence. Encoding boundaries
+    # escape invalid code units immediately before writing.
     return text[:limit]
 
 
@@ -991,9 +1205,9 @@ def emergency_manifest_content(
         ]
         return "\n".join(lines) + "\n"
 
-    content = _build(compact_pointers=False)
+    content = _escape_surrogates(_build(compact_pointers=False))
     if estimate_tokens(content) > MAX_EMERGENCY_ESTIMATED_TOKENS:
-        content = _build(compact_pointers=True)
+        content = _escape_surrogates(_build(compact_pointers=True))
     # This is a final character guard; the normal path remains well below the
     # limit, while unusual Unicode workspace names cannot expand indefinitely.
     if len(content) > MAX_EMERGENCY_CHARS:
@@ -1027,6 +1241,7 @@ def emergency_manifest_content_from_state(
     return content, None
 
 
+@_locked_session_directory_operation
 def seal_checkpoint(
     session_dir: Path,
     *,

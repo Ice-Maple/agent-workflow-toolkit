@@ -94,18 +94,25 @@ layer before host smoke evidence is captured.
 Wave 3 adds `fixtures/wave3/hooks.example.json`. It keeps the Wave 2
 non-blocking compact path and adds:
 
-- `PreToolUse` classification and dirty tracking; write, read/evidence, and
-  unknown tools are recorded before they run, while only `inspect` is treated
-  as a non-dirty state lookup;
+- no `Stop` group in the default fixture; ordinary turn completion must never
+  create a checkpoint continuation prompt;
+- `PreToolUse` classification and dirty tracking; write, unknown, and opaque
+  shell tools are dirty, while read/evidence and `inspect` are recorded without
+  creating a recovery obligation;
+- mutation-only `PreCompact` behavior and quiet initial `SessionStart` output,
+  so clean native compaction stays silent;
 - bounded `hot.md` (at most 600 estimated tokens) and warm `checkpoint.md` (at
   most 1,500 estimated tokens) validation at seal time;
 - `SubagentStart`/`SubagentStop` records attached to the root session. A root
   checkpoint cannot be sealed while a child is still running or has an unknown
-  lifecycle.
+  lifecycle;
+- a per-session cross-process transaction lock plus bounded Windows atomic
+  replace retries, so concurrent Hook callbacks do not lose state or surface
+  transient `WinError 5`/sharing violations.
 
 The Wave 3 hook output is fail-open: these hooks record state but do not return
-unsupported `continue:false` or blocking decisions for tool calls and
-subagent lifecycle events. Tool arguments and subagent messages are persisted
+unsupported `continue:false` or blocking decisions for normal turns, tool
+calls, and subagent lifecycle events. Tool arguments and subagent messages are persisted
 as hashes/lengths only. Use a private `CODEX_CONTEXT_CONTINUITY_HOME`, replace
 `<REPO_ROOT>` in the fixture, review/trust the exact hooks, and save W3 evidence
 under `tests/context_continuity/evidence/<date>/W3-*`.
@@ -116,6 +123,7 @@ At minimum capture:
 
 - `SessionStart` sources: `startup`, `resume`, and `compact` when available;
 - `PreCompact` and `PostCompact` trigger values: `manual` and `auto`;
-- `Stop` payload presence and `stop_hook_active` behavior;
+- absence of `Stop` from the Wave 3 default fixture and normal turn completion
+  without a visible continuation prompt;
 - whether compact completion is followed by `SessionStart(source=compact)`;
 - whether a hook error or probe output changes the turn outcome.

@@ -9,10 +9,24 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from .state import append_event, digest, ensure_session, write_state
+    from .state import (
+        append_event,
+        digest,
+        ensure_session,
+        session_directory,
+        session_state_lock,
+        write_state,
+    )
 else:  # Allow the exact file path used by hooks.example.json.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from tools.context_continuity.state import append_event, digest, ensure_session, write_state  # type: ignore[no-redef]
+    from tools.context_continuity.state import (  # type: ignore[no-redef]
+        append_event,
+        digest,
+        ensure_session,
+        session_directory,
+        session_state_lock,
+        write_state,
+    )
 
 
 def _payload() -> dict[str, Any]:
@@ -25,16 +39,12 @@ def _payload() -> dict[str, Any]:
 
 
 def _emit(value: dict[str, Any]) -> None:
-    json.dump(value, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    json.dump(value, sys.stdout, ensure_ascii=True, separators=(",", ":"))
     sys.stdout.write("\n")
 
 
-def main() -> int:
-    payload = _payload()
+def _main_locked(payload: dict[str, Any]) -> int:
     trigger = payload.get("trigger")
-    if trigger not in ("manual", "auto"):
-        _emit({})
-        return 0
     try:
         session_dir, state, error = ensure_session(
             payload.get("session_id"),
@@ -89,6 +99,23 @@ def main() -> int:
     else:
         _emit({})
     return 0
+
+
+def main() -> int:
+    payload = _payload()
+    if payload.get("trigger") not in ("manual", "auto"):
+        _emit({})
+        return 0
+    try:
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("missing session_id")
+        session_dir = session_directory(session_id)
+        with session_state_lock(session_dir):
+            return _main_locked(payload)
+    except (OSError, UnicodeError, RuntimeError, ValueError, TypeError) as exc:
+        _emit({"systemMessage": f"Context continuity PostCompact unavailable: {exc}"})
+        return 0
 
 
 if __name__ == "__main__":
