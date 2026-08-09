@@ -82,7 +82,7 @@ func ParseJSONL(raw []byte) StreamSummary {
 func normalizeEvent(object map[string]any, sequence int) StreamEvent {
 	eventType := firstString(object, "type", "event", "kind")
 	eventType = strings.ToLower(strings.TrimSpace(eventType))
-	sessionID := firstString(object, "session_id", "sessionId", "chat_id", "chatId")
+	sessionID := firstString(object, "session_id", "sessionId", "thread_id", "threadId", "chat_id", "chatId")
 	text, source := finalText(object, eventType)
 	tool := isToolEvent(object, eventType)
 	terminal, status := terminalEvidence(object, eventType)

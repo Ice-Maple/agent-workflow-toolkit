@@ -46,3 +46,10 @@ func TestStreamSummaryPreservesMalformedLinesWithoutCompletion(t *testing.T) {
 		t.Fatalf("malformed-line summary = %#v", summary)
 	}
 }
+
+func TestStreamSummaryRecognizesCodexThreadID(t *testing.T) {
+	summary := ParseJSONL([]byte(`{"type":"thread.started","thread_id":"thread-1"}` + "\n" + `{"type":"item.completed","item":{"type":"agent_message","text":"ADAPTER_SMOKE_OK"}}` + "\n" + `{"type":"turn.completed"}`))
+	if summary.SessionID != "thread-1" || !summary.Terminal || summary.FinalText != "ADAPTER_SMOKE_OK" || !summary.DeliveryComplete() {
+		t.Fatalf("Codex stream summary = %#v", summary)
+	}
+}

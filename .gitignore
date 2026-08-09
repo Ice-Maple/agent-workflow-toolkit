@@ -3,3 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+
+# Runtime delivery staging created by external CLI adapters
+.agent-workflow/

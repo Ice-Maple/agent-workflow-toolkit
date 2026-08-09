@@ -25,7 +25,22 @@ $env:CODEX_ADAPTER_SMOKE_MODEL='gpt-5.6-luna'
 go test -run '^TestRealCodexDeliverySmoke$' -v ./internal/adapters/codexcli
 ```
 
-The Adapter always requests `--output-last-message`; exit code 0 with no durable or structured final message is reported as `delivery_missing`.
+If the registered model uses a custom provider, supply its non-secret route
+configuration through `CODEX_ADAPTER_SMOKE_MODEL_PROVIDER`,
+`CODEX_ADAPTER_SMOKE_PROVIDER_BASE_URL`,
+`CODEX_ADAPTER_SMOKE_PROVIDER_WIRE_API` and
+`CODEX_ADAPTER_SMOKE_PROVIDER_AUTH=1`; do not put credentials in the
+repository or evidence. Adapter invocations ignore the user's global Codex
+config so unrequested MCP servers are not inherited. The Adapter always
+requests `--output-last-message`; exit code 0 with no durable or structured
+final message is reported as `delivery_missing`.
+
+The real resumable Adapter path is separately opt-in:
+
+```powershell
+$env:CODEX_ADAPTER_REAL_LIFECYCLE_SMOKE='1'
+go test -run '^TestRealCodexAdapterLifecycleSmoke$' -v ./internal/adapters/codexcli
+```
 
 The first Wave 3 Cursor Agent Adapter is implemented in
 `internal/adapters/cursor/`. Its default Windows path is read-only `plan` mode:
