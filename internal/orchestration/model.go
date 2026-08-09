@@ -171,6 +171,7 @@ type HostAction struct {
 
 type HostActionResult struct {
 	Status            string            `json:"status"`
+	Reason            string            `json:"reason,omitempty"`
 	ProviderHandle    string            `json:"provider_handle,omitempty"`
 	ProviderSessionID string            `json:"provider_session_id,omitempty"`
 	Terminal          bool              `json:"terminal"`

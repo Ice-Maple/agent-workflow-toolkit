@@ -312,6 +312,39 @@ func TestRequiredArtifactControlsCompletion(t *testing.T) {
 	}
 }
 
+func TestAdapterDeliveryReasonSurvivesCoreCompletionDecision(t *testing.T) {
+	core, _, launch := preparedAttemptForTest(t)
+	started := true
+	failed, err := core.SubmitHostActionResult(SubmitHostActionResultInput{
+		AttemptID: launch.Attempt.ID,
+		ActionID:  launch.LaunchAction.ID,
+		Lease:     launch.LaunchAction.Lease,
+		Result: orchestration.HostActionResult{
+			Status:            "failed",
+			Reason:            "delivery_missing",
+			ProviderHandle:    "cursor-process",
+			ProviderSessionID: "cursor-session",
+			ExecutionStarted:  &started,
+			SideEffectState:   "none",
+			Identity:          map[string]string{"provider": "fake", "session": "cursor-session", "workspace": launch.Attempt.Binding.Workspace},
+			TaskCanary:        launch.Attempt.TaskCanary,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Attempt.Status != orchestration.AttemptFailed {
+		t.Fatalf("failed delivery attempt = %#v", failed.Attempt)
+	}
+	completion, err := core.RequestCompletion(CompletionInput{AttemptID: launch.Attempt.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.Decision.Status != orchestration.AttemptIncomplete || completion.Decision.Reason != "delivery_missing" {
+		t.Fatalf("delivery reason was not preserved: %#v", completion.Decision)
+	}
+}
+
 func TestCancelAndTimeoutResultsMapToDistinctAttemptStates(t *testing.T) {
 	core, _, launch := preparedAttemptForTest(t)
 	cancel, err := core.RequestCancel(CancelInput{AttemptID: launch.Attempt.ID, Reason: "user requested stop"})

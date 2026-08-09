@@ -14,6 +14,7 @@
 | 降低 Codex 自动压缩后的遗忘和重复执行 | Hook 运行包 | [`tests/context_continuity/fixtures/wave3/hooks.example.json`](../../tests/context_continuity/fixtures/wave3/hooks.example.json) | Wave 3 脚本级实现；真实 App 宿主仍待验证 |
 | 验证上下文连续性 Hook 的本地行为 | 测试/CLI smoke | [`tests/context_continuity/README.md`](../../tests/context_continuity/README.md) | Wave 0–3 回归和本地 smoke 已有 |
 | 校验多 Agent 协同请求/响应协议 | Go CLI + Protocol | [`cmd/agent-workflow-core/main.go`](../../cmd/agent-workflow-core/main.go) | Wave 0 协议骨架 |
+| 接入 Cursor Agent 外部 Adapter | Go Adapter | [`internal/adapters/cursor/cursor.go`](../../internal/adapters/cursor/cursor.go) | Wave 3 首个只读 Windows 路径已实现并完成真实 smoke；等待独立 review/checkpoint |
 | 接入 Codex CLI 外部 Adapter | Go Adapter | [`internal/adapters/codexcli/codex.go`](../../internal/adapters/codexcli/codex.go) | 有实现和回归测试；真实 Provider smoke 需显式开启 |
 | 了解多 Agent MVP 的整体设计和 Wave | 设计/计划 | [`docs/plans/2026-08-07-multi-agent-orchestration-mvp-waves.md`](../plans/2026-08-07-multi-agent-orchestration-mvp-waves.md) | 计划与实现并行演进，不是直接运行入口 |
 
@@ -76,7 +77,8 @@ SubagentStop    → subagent_stop.py
 - 设计与计划：[`docs/brainstorms/2026-08-07-multi-agent-orchestration-mvp.md`](../brainstorms/2026-08-07-multi-agent-orchestration-mvp.md) 和 [`docs/plans/2026-08-07-multi-agent-orchestration-mvp-waves.md`](../plans/2026-08-07-multi-agent-orchestration-mvp-waves.md)
 
 `skills/multi-agent-orchestration/` Controller Skill 已完成真实 Codex App Native smoke、artifact 校验和人工批准，
-详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`；Wave2 Native MVP 已验收，但尚未进入 Wave3 外部 CLI 或 `experimental` 阶段。
+详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`；Wave2 Native MVP 已验收。Wave3 当前推进 Cursor Agent 只读路径，
+真实记录见 [`W3-cursor-adapter-smoke.md`](../../tests/orchestration/evidence/2026-08-09/W3-cursor-adapter-smoke.md)，仍未进入 `experimental` 阶段。
 
 ## 按目录判断“这是什么”
 
@@ -95,7 +97,7 @@ SubagentStop    → subagent_stop.py
 ## 当前仍存在的整理缺口
 
 1. 上下文连续性只有 Hook 入口，没有对应的模型行为 Skill。
-2. 多 Agent Wave 2 的 Controller Skill、fake contract、真实 Native smoke 和 reviewer 人工批准已落地；Wave3 尚未开始。
+2. 多 Agent Wave 2 的 Controller Skill、fake contract、真实 Native smoke 和 reviewer 人工批准已落地；Wave3 已开始 Cursor Agent 首个 Adapter slice，Claude Code/Codex CLI 尚未接入。
 3. 以前各功能按各自 Wave 逐步加入，暂时没有统一的 capability manifest 或根级入口索引。
 
 因此，今后新增功能至少应同时登记：

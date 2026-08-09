@@ -27,4 +27,21 @@ go test -run '^TestRealCodexDeliverySmoke$' -v ./internal/adapters/codexcli
 
 The Adapter always requests `--output-last-message`; exit code 0 with no durable or structured final message is reported as `delivery_missing`.
 
+The first Wave 3 Cursor Agent Adapter is implemented in
+`internal/adapters/cursor/`. Its default Windows path is read-only `plan` mode:
+workspace trust is explicit, sandbox enabled mode and task/session MCP
+allowlists fail closed, and `stream-json` must contain both a terminal event
+and final text. The real smoke is opt-in:
+
+```powershell
+$env:CURSOR_ADAPTER_REAL_SMOKE='1'
+$env:CURSOR_ADAPTER_SMOKE_WORKSPACE='E:\projects\agent-workflow-toolkit'
+$env:CURSOR_ADAPTER_SMOKE_MODEL='cursor-grok-4.5-high'
+go test -run '^TestRealCursorAdapterSmoke$' -v ./internal/adapters/cursor
+```
+
+The sanitized run record is [`W3-cursor-adapter-smoke.md`](evidence/2026-08-09/W3-cursor-adapter-smoke.md).
+This is a Cursor review/checkpoint slice, not the Wave 3 completion or an
+`experimental` declaration.
+
 Wave evidence belongs under `tests/orchestration/evidence/<YYYY-MM-DD>/W*-*`. Do not store credentials, authentication headers, complete environment variables, or private user prompts in evidence.

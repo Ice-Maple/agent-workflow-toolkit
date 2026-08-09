@@ -796,6 +796,7 @@ func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (Act
 		"action_id":                  action.ID,
 		"kind":                       action.Kind,
 		"status":                     input.Result.Status,
+		"reason":                     input.Result.Reason,
 		"terminal":                   input.Result.Terminal,
 		"identity_present":           len(input.Result.Identity) > 0,
 		"provider_session_present":   input.Result.ProviderSessionID != "" || identityHasSession(input.Result.Identity),
@@ -898,7 +899,10 @@ func (g *Gateway) RequestCompletion(input CompletionInput) (CompletionResult, er
 	decision := orchestration.CompletionDecision{ID: orchestration.NewID("completion"), AttemptID: attempt.ID, Status: attempt.Status, CreatedAt: time.Now().UTC()}
 	if attempt.Status != orchestration.AttemptCompleted {
 		decision.Status = orchestration.AttemptIncomplete
-		decision.Reason = "attempt_not_terminal_completed"
+		decision.Reason = latestAttemptOutcomeReason(state, attempt.ID)
+		if decision.Reason == "" {
+			decision.Reason = "attempt_not_terminal_completed"
+		}
 	} else if attempt.ProviderHandle == "" || len(attempt.Identity) == 0 {
 		decision.Status = orchestration.AttemptIncomplete
 		decision.Reason = "identity_or_provider_handle_missing"
@@ -1379,6 +1383,19 @@ func hasTerminalEvent(state storage.State, attempt orchestration.Attempt) bool {
 		return ok && terminal
 	}
 	return false
+}
+
+func latestAttemptOutcomeReason(state storage.State, attemptID string) string {
+	for index := len(state.Events) - 1; index >= 0; index-- {
+		event := state.Events[index]
+		if event.AttemptID != attemptID || event.Type != "host_action.result" {
+			continue
+		}
+		if reason, ok := event.Data["reason"].(string); ok && strings.TrimSpace(reason) != "" {
+			return strings.TrimSpace(reason)
+		}
+	}
+	return ""
 }
 
 func hasRetryApproval(state storage.State, nodeID string) bool {
