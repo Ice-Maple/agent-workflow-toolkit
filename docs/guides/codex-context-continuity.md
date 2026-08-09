@@ -16,6 +16,21 @@
 - 如果工作做到一半突然被压缩，先写一张更小的临时便签；
 - 只有压缩时存在外部写入或异常状态，才要求核对磁盘结果并恢复。
 
+## 当前实施状态（2026-08-09）
+
+当前版本已经完成 Wave 0–3 的脚本实现，并已应用到本机用户级 Codex 全局配置。当前状态如下：
+
+| 范围 | 状态 | 说明 |
+| --- | --- | --- |
+| Wave 0–3 核心 Hook | 已完成 | 包含会话启动、压缩前后恢复、工具/子 Agent 生命周期记录、checkpoint/seal 和并发安全。 |
+| 最近两项修复 | 已完成 | 缺少 `session_id` 时静默放行；简单且可证明只读的 PowerShell 命令不再误标 `dirty`。 |
+| 本机全局应用 | 已完成 | `%USERPROFILE%\.codex\hooks.json` 直接引用本仓库脚本；当前注册 `SessionStart`、`PreToolUse`、`PreCompact`、`PostCompact`、`SubagentStart`、`SubagentStop`，不注册 `Stop`。 |
+| 本地验证 | 已完成 | 66 项连续性测试、编译检查和差异空白检查通过。 |
+| 当前 App 事件观察 | 部分完成 | 已观察到真实 `PreCompact(auto)` → `PostCompact` → `SessionStart(source=compact)` 恢复链路；仍需在其他宿主/环境重复验证。 |
+| 精确安排压缩时机 | 未实现 | 当前 Hook 不发起或延后原生自动压缩；只负责压缩期间的恢复保护。需要另行实施 Wave 4 控制器。 |
+
+因此，“Wave 3 已完成”指恢复型 Hook 能力和全局非阻塞配置已完成，不代表已经实现“压缩只发生在 turn 边界”或完成所有 Codex App 宿主的验收。
+
 ## Wave 分别做什么
 
 Wave 是开发阶段，不是需要用户切换的四种模式。
