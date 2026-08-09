@@ -44,4 +44,25 @@ The sanitized run record is [`W3-cursor-adapter-smoke.md`](evidence/2026-08-09/W
 This is a Cursor review/checkpoint slice, not the Wave 3 completion or an
 `experimental` declaration.
 
+The Claude Code Adapter is implemented in `internal/adapters/claude/`. Its
+Wave 3 path is read-only `plan` mode with explicit workspace authorization,
+strict MCP configuration, stream-json session/final/terminal evidence, and
+core-authorized session resume. Claude model availability is kept as an
+explicit binding because the CLI has no verified model-list preflight command;
+the Adapter never enables a fallback model. Its real smoke is opt-in:
+
+```powershell
+$env:CLAUDE_ADAPTER_REAL_SMOKE='1'
+$env:CLAUDE_ADAPTER_SMOKE_WORKSPACE='E:\projects\agent-workflow-toolkit'
+$env:CLAUDE_ADAPTER_SMOKE_MODEL='deepseek-v4-pro'
+go test -run '^TestRealClaudeAdapterSmoke$' -v ./internal/adapters/claude
+```
+
+The sanitized run record is [`W3-claude-adapter-smoke.md`](evidence/2026-08-09/W3-claude-adapter-smoke.md).
+The Claude independent review and targeted closure are recorded in
+`docs/reviews/2026-08-09-wave3-claude-adapter-review.md` and
+`docs/reviews/2026-08-09-wave3-claude-adapter-targeted-recheck.md`. This is a
+closed Claude implementation/checkpoint slice, not a Wave 3 completion or an
+`experimental` declaration.
+
 Wave evidence belongs under `tests/orchestration/evidence/<YYYY-MM-DD>/W*-*`. Do not store credentials, authentication headers, complete environment variables, or private user prompts in evidence.

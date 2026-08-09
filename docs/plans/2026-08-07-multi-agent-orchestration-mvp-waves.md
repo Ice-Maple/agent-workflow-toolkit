@@ -328,3 +328,11 @@ Wave 0 通过后，第一轮实际实现建议按以下原子任务建立提交�
 Wave 0 的第一批可执行产物已经落盘：protocol v1、能力探针入口、fake contract 和证据格式。当前已进入 Wave 1，完成了 `Task/Revision/Node/Attempt/HostAction/Event` 的第一版状态模型、文件 snapshot/event 存储、显式 binding preflight、host action lease、request/action 幂等、checkpoint、Goal authority 骨架以及 fake E2E vertical slice。
 
 Wave 1 的 Go 核心实现、文件存储、TaskGateway、策略门禁和 fake E2E 已完成；最近一次 Cursor / Grok 4.5 High（非 Fast）复审为 `PASS WITH CONDITIONS`，其最后一个 P1（确认取消后人工 retry 无法重新创建同节点 Attempt）已修复并通过 `go test -race ./...`、`go vet ./...`、`go build ./...` 和 `git diff --check`。修复后的外部复审尚未重新执行，详见 [Wave 1 当前状态与交接记录](../reviews/2026-08-08-wave1-closure-status.md)。Wave 2 已落地 Controller Skill、Native action contract、fake Native executor 及其 contract 测试，并已用 Codex App 原生 Subagent 完成真实 launch/observe/completion、artifact delivery 和 `approve` 人工检查点；Native MVP 已验收，详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`。Wave 3 已开始 Cursor Agent 只读 Adapter slice，并完成一次真实 smoke，详见 `tests/orchestration/evidence/2026-08-09/W3-cursor-adapter-smoke.md`；Cursor 仍待独立 review/checkpoint，Claude Code 与 Codex CLI 尚未接入。
+## Wave 3 implementation status update (2026-08-09)
+
+Cursor Agent and Claude Code read-only Adapter slices have completed
+implementation, real smoke, independent review and targeted closure. Cursor
+and Claude checkpoints are closed; neither is declared `experimental`. The
+next planned slice is Codex CLI. The per-Adapter progress and review records
+are under `docs/reviews/2026-08-09-wave3-*` and sanitized smoke evidence is
+under `tests/orchestration/evidence/2026-08-09/`.

@@ -110,3 +110,11 @@ SubagentStop    → subagent_stop.py
 - 当前成熟度和未验证边界。
 
 本文件就是当前仓库的统一导航页；它不是新的运行时依赖，也不会改变现有 Skill、Hook 或 CLI 路径。
+## Wave 3 external Adapter status update (2026-08-09)
+
+The Cursor Agent read-only Adapter and the Claude Code read-only Adapter have
+each completed implementation, real smoke, independent Cursor review and
+targeted closure. Their evidence is [`W3-cursor-adapter-smoke.md`](../../tests/orchestration/evidence/2026-08-09/W3-cursor-adapter-smoke.md)
+and [`W3-claude-adapter-smoke.md`](../../tests/orchestration/evidence/2026-08-09/W3-claude-adapter-smoke.md);
+the per-Adapter review records are under `docs/reviews/`. Neither path is
+declared `experimental`. Codex CLI remains the next Wave 3 Adapter slice.
