@@ -142,7 +142,7 @@ func runRealCursorReview(t *testing.T, config cursorReviewConfig) cursorReviewRu
 	}
 	t.Logf("initial_status=%s initial_reason=%s initial_final_bytes=%d final_status=%s final_reason=%s final_source=%s session_present=%t terminal=%t exit_code=%d final_bytes=%d follow_up=%t", initial.Status, initial.Reason, len(initial.FinalText), terminal.Status, terminal.Reason, terminal.FinalSource, terminal.ProviderSessionID != "", terminal.Terminal, terminal.ExitCode, len(terminal.FinalText), followUpUsed)
 	if terminal.Status != "completed" || !terminal.Terminal || strings.TrimSpace(terminal.FinalText) == "" {
-		t.Fatalf("Cursor review delivery was not completed: %#v", terminal)
+		t.Fatalf("Cursor review delivery was not completed: status=%s reason=%s source=%s session_present=%t terminal=%t exit_code=%d final_bytes=%d", terminal.Status, terminal.Reason, terminal.FinalSource, terminal.ProviderSessionID != "", terminal.Terminal, terminal.ExitCode, len(terminal.FinalText))
 	}
 	return cursorReviewRun{Adapter: adapter, Workspace: canonicalWorkspace, Model: model, Initial: initial, Terminal: terminal, FollowUpUsed: followUpUsed}
 }
@@ -151,7 +151,7 @@ func stageCursorReviewReport(t *testing.T, run cursorReviewRun, config cursorRev
 	t.Helper()
 	body := strings.TrimSpace(run.Terminal.FinalText)
 	body = strings.TrimPrefix(body, "\ufeff")
-	body = strings.TrimSpace(strings.TrimPrefix(body, config.Title))
+	body = normalizeReviewBody(body, config.Title)
 	report := fmt.Sprintf("%s\n\n- Reviewer/model: Cursor Agent / %s\n- Adapter: Cursor (`cursor`)\n- Execution: read-only `plan` mode with explicit workspace trust\n- Initial delivery: status `%s`, reason `%s`, final bytes `%d`\n- Final delivery: status `%s`, reason `%s`, final source `%s`, terminal `%t`, exit code `%d`, final bytes `%d`\n- Delivery recovery: same-session core-authorized follow-up used: `%t`\n- Prompt: sanitized; private prompt text is intentionally not stored in this artifact\n\n%s\n", config.Title, run.Model, run.Initial.Status, run.Initial.Reason, len(run.Initial.FinalText), run.Terminal.Status, run.Terminal.Reason, run.Terminal.FinalSource, run.Terminal.Terminal, run.Terminal.ExitCode, len(run.Terminal.FinalText), run.FollowUpUsed, strings.TrimSpace(body))
 	reportPath := filepath.Join(run.Workspace, config.ReportRelativePath)
 	artifact, err := run.Adapter.StageArtifact(run.Workspace, reportPath, "markdown", report, config.RequiredSections)
@@ -168,6 +168,62 @@ func hasReviewSections(content string, requiredSections []string) bool {
 		}
 	}
 	return true
+}
+
+func normalizeReviewBody(raw, title string) string {
+	body := strings.TrimSpace(strings.TrimPrefix(raw, "\ufeff"))
+	if title != "" && strings.HasPrefix(body, title) {
+		body = strings.TrimSpace(strings.TrimPrefix(body, title))
+	}
+	lines := strings.Split(body, "\n")
+	sectionIndex := -1
+	for index, line := range lines {
+		if strings.TrimSpace(line) == "## Scope and evidence" {
+			sectionIndex = index
+			break
+		}
+	}
+	if sectionIndex <= 0 {
+		return body
+	}
+	prefix := make([]string, 0, 2)
+	for _, line := range lines[:sectionIndex] {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- Scope and worktree basis:") || strings.HasPrefix(trimmed, "- Verdict:") {
+			prefix = append(prefix, trimmed)
+		}
+	}
+	sections := strings.TrimSpace(strings.Join(lines[sectionIndex:], "\n"))
+	if len(prefix) == 0 {
+		return sections
+	}
+	return strings.Join(append(prefix, "", sections), "\n")
+}
+
+func TestNormalizeReviewBodyRemovesDuplicateHarness(t *testing.T) {
+	raw := `# Wave 4 cross-Adapter hardening review
+
+- Reviewer/model: stale
+- Adapter: Cursor
+- Execution: old
+- Initial delivery: old
+- Final delivery: old
+- Delivery recovery: old
+- Prompt: old
+- Scope and worktree basis: current scope
+- Verdict: PASS WITH CONDITIONS
+
+## Scope and evidence
+
+current evidence`
+	got := normalizeReviewBody(raw, "# Wave 4 cross-Adapter hardening review")
+	want := "- Scope and worktree basis: current scope\n- Verdict: PASS WITH CONDITIONS\n\n## Scope and evidence\n\ncurrent evidence"
+	if got != want {
+		t.Fatalf("normalized review body = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "- Adapter:") || strings.Contains(got, "- Final delivery: old") {
+		t.Fatalf("duplicate harness metadata remained: %q", got)
+	}
 }
 
 func observeCursorReview(t *testing.T, adapter *Adapter, ctx context.Context, handle string) ExecutionResult {
@@ -188,7 +244,7 @@ func observeCursorReview(t *testing.T, adapter *Adapter, ctx context.Context, ha
 		select {
 		case <-ctx.Done():
 			cancelCursorReview(t, adapter, handle)
-			t.Fatalf("Cursor review observe timed out: %#v", latest)
+			t.Fatalf("Cursor review observe timed out: status=%s reason=%s session_present=%t terminal=%t", latest.Status, latest.Reason, latest.ProviderSessionID != "", latest.Terminal)
 		case <-ticker.C:
 		}
 	}

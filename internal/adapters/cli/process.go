@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -133,17 +132,6 @@ func (r *Runner) Start(ctx context.Context, command Command) (*Handle, error) {
 	if command.Environment != nil {
 		cmd.Env = mergedEnvironment(command.Environment)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("create stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("create stderr pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start external CLI: %w", err)
-	}
 	handle := &Handle{
 		cmd:        cmd,
 		killTree:   killTree,
@@ -152,19 +140,20 @@ func (r *Runner) Start(ctx context.Context, command Command) (*Handle, error) {
 		finishedCh: make(chan struct{}),
 		done:       make(chan Result, 1),
 	}
-	var readers sync.WaitGroup
-	readers.Add(2)
-	go func() {
-		defer readers.Done()
-		handle.readLines(stdout, true)
-	}()
-	go func() {
-		defer readers.Done()
-		handle.readLines(stderr, false)
-	}()
+	stdout := &outputCollector{handle: handle, stdout: true}
+	stderr := &outputCollector{handle: handle}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start external CLI: %w", err)
+	}
 	go func() {
 		err := cmd.Wait()
-		readers.Wait()
+		// When Stdout/Stderr are custom writers, os/exec waits for its copy
+		// goroutines before returning from Wait. Flush a final line without a
+		// newline before publishing Finished/Done to observers.
+		stdout.flush()
+		stderr.flush()
 		handle.finish(err)
 	}()
 	go func() {
@@ -177,38 +166,78 @@ func (r *Runner) Start(ctx context.Context, command Command) (*Handle, error) {
 	return handle, nil
 }
 
-func (h *Handle) readLines(reader io.Reader, stdout bool) {
-	scanner := bufio.NewScanner(reader)
-	// JSONL events can contain long tool payloads. Keep a bounded but generous
-	// line limit so a malformed provider cannot allocate without limit.
-	scanner.Buffer(make([]byte, 32*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := append([]byte(nil), scanner.Bytes()...)
-		h.mu.Lock()
-		if stdout {
-			h.stdout.Write(line)
-			h.stdout.WriteByte('\n')
-			h.stdoutLines = append(h.stdoutLines, line)
-		} else {
-			h.stderr.Write(line)
-			h.stderr.WriteByte('\n')
-			h.stderrLines = append(h.stderrLines, line)
-		}
-		h.mu.Unlock()
+type outputCollector struct {
+	handle  *Handle
+	stdout  bool
+	pending []byte
+}
+
+func (c *outputCollector) Write(data []byte) (int, error) {
+	if c == nil || c.handle == nil {
+		return 0, errors.New("output collector is not initialized")
+	}
+	if len(data) == 0 {
+		return 0, nil
+	}
+	h := c.handle
+	h.mu.Lock()
+	if c.stdout {
+		_, _ = h.stdout.Write(data)
+	} else {
+		_, _ = h.stderr.Write(data)
+	}
+	c.pending = append(c.pending, data...)
+	notified := c.appendCompleteLinesLocked()
+	h.mu.Unlock()
+	if notified {
 		select {
 		case h.lineNotify <- struct{}{}:
 		default:
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		h.mu.Lock()
-		message := []byte("[stream read error: " + err.Error() + "]\n")
-		if stdout {
-			h.stdout.Write(message)
-		} else {
-			h.stderr.Write(message)
+	return len(data), nil
+}
+
+func (c *outputCollector) appendCompleteLinesLocked() bool {
+	notified := false
+	for {
+		index := bytes.IndexByte(c.pending, '\n')
+		if index < 0 {
+			return notified
 		}
+		line := append([]byte(nil), c.pending[:index]...)
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if c.stdout {
+			c.handle.stdoutLines = append(c.handle.stdoutLines, line)
+		} else {
+			c.handle.stderrLines = append(c.handle.stderrLines, line)
+		}
+		c.pending = c.pending[index+1:]
+		notified = true
+	}
+}
+
+func (c *outputCollector) flush() {
+	if c == nil || c.handle == nil {
+		return
+	}
+	h := c.handle
+	h.mu.Lock()
+	if len(c.pending) == 0 {
 		h.mu.Unlock()
+		return
+	}
+	line := append([]byte(nil), c.pending...)
+	if c.stdout {
+		h.stdoutLines = append(h.stdoutLines, line)
+	} else {
+		h.stderrLines = append(h.stderrLines, line)
+	}
+	c.pending = nil
+	h.mu.Unlock()
+	select {
+	case h.lineNotify <- struct{}{}:
+	default:
 	}
 }
 

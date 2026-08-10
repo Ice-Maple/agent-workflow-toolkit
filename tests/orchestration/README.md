@@ -42,7 +42,7 @@ $env:CODEX_ADAPTER_REAL_LIFECYCLE_SMOKE='1'
 go test -run '^TestRealCodexAdapterLifecycleSmoke$' -v ./internal/adapters/codexcli
 ```
 
-The first Wave 3 Cursor Agent Adapter is implemented in
+The Wave 3 Cursor Agent Adapter is implemented in
 `internal/adapters/cursor/`. Its default Windows path is read-only `plan` mode:
 workspace trust is explicit, sandbox enabled mode and task/session MCP
 allowlists fail closed, and `stream-json` must contain both a terminal event
@@ -56,8 +56,23 @@ go test -run '^TestRealCursorAdapterSmoke$' -v ./internal/adapters/cursor
 ```
 
 The sanitized run record is [`W3-cursor-adapter-smoke.md`](evidence/2026-08-09/W3-cursor-adapter-smoke.md).
-This is a Cursor review/checkpoint slice, not the Wave 3 completion or an
-`experimental` declaration.
+This is a closed Cursor implementation/checkpoint slice, not an
+`experimental` declaration. Cross-Adapter Wave 4 conformance is covered by
+`TestWave4ExternalAdapterLifecycleConformance` under `tests/orchestration/`.
+
+The Wave 4 independent Cursor review is also opt-in and uses the same
+read-only, trusted workspace boundary:
+
+```powershell
+$env:CURSOR_ADAPTER_WAVE4_REVIEW='1'
+$env:CURSOR_ADAPTER_EXECUTABLE='C:\Users\<user>\AppData\Local\cursor-agent\agent.cmd'
+$env:CURSOR_ADAPTER_SMOKE_WORKSPACE='E:\projects\agent-workflow-toolkit'
+$env:CURSOR_ADAPTER_SMOKE_MODEL='cursor-grok-4.5-high'
+go test -run '^TestRealCursorWave4Review$' -v ./internal/adapters/cursor
+```
+
+The sanitized review artifact is
+[`2026-08-10-wave4-cursor-review.md`](../../docs/reviews/2026-08-10-wave4-cursor-review.md).
 
 The Claude Code Adapter is implemented in `internal/adapters/claude/`. Its
 Wave 3 path is read-only `plan` mode with explicit workspace authorization,
@@ -79,5 +94,34 @@ The Claude independent review and targeted closure are recorded in
 `docs/reviews/2026-08-09-wave3-claude-adapter-targeted-recheck.md`. This is a
 closed Claude implementation/checkpoint slice, not a Wave 3 completion or an
 `experimental` declaration.
+
+The Codex CLI Adapter is implemented in `internal/adapters/codexcli/`. Its
+Wave 3 path is read-only with explicit sandbox/approval values, ignored user
+configuration, durable `--output-last-message` delivery and core-authorized
+thread resume. Its real lifecycle smoke is opt-in:
+
+```powershell
+$env:CODEX_ADAPTER_REAL_LIFECYCLE_SMOKE='1'
+$env:CODEX_ADAPTER_SMOKE_WORKSPACE='E:\projects\agent-workflow-toolkit'
+$env:CODEX_ADAPTER_SMOKE_MODEL='gpt-5.6-luna'
+go test -run '^TestRealCodexAdapterLifecycleSmoke$' -v ./internal/adapters/codexcli
+```
+
+The sanitized run record is [`W3-codex-adapter-smoke.md`](evidence/2026-08-09/W3-codex-adapter-smoke.md).
+This is a closed Codex implementation/checkpoint slice, not an
+`experimental` declaration.
+
+Wave 4 replay fixtures are under `tests/orchestration/fixtures/wave4/replay/`.
+They exercise provider-neutral final delivery, terminal evidence, tool-only
+incomplete delivery, malformed diagnostics and provider-error delivery. Real
+Provider calls remain opt-in and must not be placed in the replay fixtures.
+
+The current four-path real smoke index is
+[`W4-smoke-matrix.md`](evidence/2026-08-10/W4-smoke-matrix.md). It separates
+current real results, historical Native evidence and Provider authorization
+blockers; it is not an `experimental` acceptance record.
+
+The initial parser/artifact benchmark is recorded in
+[`W4-benchmark-baseline.md`](evidence/2026-08-10/W4-benchmark-baseline.md).
 
 Wave evidence belongs under `tests/orchestration/evidence/<YYYY-MM-DD>/W*-*`. Do not store credentials, authentication headers, complete environment variables, or private user prompts in evidence.

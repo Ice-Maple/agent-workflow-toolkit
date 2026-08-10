@@ -57,7 +57,7 @@ func TestRealClaudeAdapterSmoke(t *testing.T) {
 	terminal := waitForRealTerminal(t, adapter, requestContext, running.ProviderHandle)
 	t.Logf("version=%s launch_status=%s launch_session_present=%t terminal_status=%s terminal_reason=%s final_source=%s terminal=%t exit_code=%d final_bytes=%d transcript=%t", preflight.Version, running.Status, running.ProviderSessionID != "", terminal.Status, terminal.Reason, terminal.FinalSource, terminal.Terminal, terminal.ExitCode, len(terminal.FinalText), terminal.TranscriptWritten)
 	if terminal.Status != "completed" || terminal.FinalText != "ADAPTER_SMOKE_OK" || !terminal.Terminal || !terminal.TranscriptWritten {
-		t.Fatalf("Claude delivery was not completed: %#v", terminal)
+		t.Fatalf("Claude delivery was not completed: status=%s reason=%s source=%s session_present=%t terminal=%t exit_code=%d final_bytes=%d transcript=%t", terminal.Status, terminal.Reason, terminal.FinalSource, terminal.ProviderSessionID != "", terminal.Terminal, terminal.ExitCode, len(terminal.FinalText), terminal.TranscriptWritten)
 	}
 }
 
@@ -77,7 +77,7 @@ func waitForRealTerminal(t *testing.T, adapter *Adapter, ctx context.Context, ha
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("Claude observe timed out: %#v", latest)
+			t.Fatalf("Claude observe timed out: status=%s reason=%s session_present=%t terminal=%t", latest.Status, latest.Reason, latest.ProviderSessionID != "", latest.Terminal)
 		case <-ticker.C:
 		}
 	}

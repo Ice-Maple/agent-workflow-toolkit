@@ -63,6 +63,6 @@ func TestRealCursorAdapterSmoke(t *testing.T) {
 	}
 	t.Logf("status=%s reason=%s source=%s session_present=%t terminal=%t exit_code=%d final_bytes=%d", terminal.Status, terminal.Reason, terminal.FinalSource, terminal.ProviderSessionID != "", terminal.Terminal, terminal.ExitCode, len(terminal.FinalText))
 	if terminal.Status != "completed" || terminal.FinalText != "ADAPTER_SMOKE_OK" {
-		t.Fatalf("Cursor delivery was not completed: %#v", terminal)
+		t.Fatalf("Cursor delivery was not completed: status=%s reason=%s source=%s session_present=%t terminal=%t exit_code=%d final_bytes=%d", terminal.Status, terminal.Reason, terminal.FinalSource, terminal.ProviderSessionID != "", terminal.Terminal, terminal.ExitCode, len(terminal.FinalText))
 	}
 }

@@ -164,7 +164,7 @@ func (a *Adapter) Preflight(ctx context.Context, request PreflightRequest) (Pref
 			a.Runner = cli.NewRunner()
 		}
 		probe = func(probeContext context.Context, executable string, args []string) (cli.Result, error) {
-			return a.Runner.Run(probeContext, cli.Command{Executable: executable, Args: args, Dir: workspace})
+			return a.Runner.Run(probeContext, cli.Command{Executable: executable, Args: args, Dir: workspace, Environment: append([]string(nil), a.Environment...)})
 		}
 	}
 	versionResult, err := probe(ctx, a.executable(), []string{"--version"})
@@ -444,6 +444,14 @@ func (a *Adapter) Send(ctx context.Context, request SendRequest) (ExecutionResul
 		s.mu.Unlock()
 		return ExecutionResult{}, errors.New("Cursor session is still running")
 	}
+	if s.contaminated {
+		s.mu.Unlock()
+		return ExecutionResult{}, errors.New("Cursor session is contaminated")
+	}
+	if s.sendInFlight {
+		s.mu.Unlock()
+		return ExecutionResult{}, errors.New("Cursor session already has a follow-up in flight")
+	}
 	if s.providerSessionID == "" {
 		s.mu.Unlock()
 		return ExecutionResult{}, errors.New("Cursor session identity is missing")
@@ -461,25 +469,23 @@ func (a *Adapter) Send(ctx context.Context, request SendRequest) (ExecutionResul
 		s.mu.Unlock()
 		return ExecutionResult{}, errors.New("task canary does not match the session")
 	}
+	s.sendInFlight = true
 	base := s.request
 	providerSessionID := s.providerSessionID
 	s.mu.Unlock()
 	args, err := (Invocation{Executable: a.executable(), Workspace: base.Workspace, Model: base.Model, Mode: base.Mode, Trust: base.TrustAuthorized, ResumeSessionID: providerSessionID}).Args(request.Prompt)
 	if err != nil {
-		s.mu.Lock()
-		delete(s.sendActions, request.ActionID)
-		s.mu.Unlock()
+		s.rollbackSend(request.ActionID)
 		return ExecutionResult{}, err
 	}
 	turn, err := a.startTurn(ctx, base, args, providerSessionID)
 	if err != nil {
-		s.mu.Lock()
-		delete(s.sendActions, request.ActionID)
-		s.mu.Unlock()
+		s.rollbackSend(request.ActionID)
 		return ExecutionResult{}, err
 	}
 	s.mu.Lock()
 	s.current = turn
+	s.sendInFlight = false
 	s.mu.Unlock()
 	go a.consumeTurn(s, turn)
 	return s.runningResult(), nil
@@ -533,6 +539,7 @@ func (a *Adapter) Cancel(ctx context.Context, request CancelRequest) (ExecutionR
 		result := s.terminalResult(turn)
 		if !cancel.Confirmed && result.Status == "cancelled" {
 			result.Status, result.Reason = "cancel_unconfirmed", "process_kill_unconfirmed"
+			result.SideEffectState = "unknown"
 		}
 		return result, nil
 	case <-ctx.Done():
@@ -575,6 +582,8 @@ type session struct {
 	request           LaunchRequest
 	current           *turn
 	sendActions       map[string]struct{}
+	sendInFlight      bool
+	contaminated      bool
 }
 
 type turn struct {
@@ -609,23 +618,15 @@ func (a *Adapter) startTurn(ctx context.Context, request LaunchRequest, args []s
 
 func (a *Adapter) consumeTurn(s *session, turn *turn) {
 	for {
-		for _, line := range turn.process.DrainStdoutLines() {
-			turn.mu.Lock()
-			_ = turn.summary.AddLine(line)
-			sessionID := turn.summary.SessionID
-			turn.mu.Unlock()
-			if sessionID != "" {
-				turn.readyOnce.Do(func() { close(turn.ready) })
-			}
-		}
+		a.drainTurnOutput(turn)
 		select {
 		case <-turn.process.Finished():
+			// Finished is published only after the runner flushes its final
+			// collector line. Drain it before classifying the terminal result.
+			a.drainTurnOutput(turn)
 			processResult := turn.process.Wait()
 			turn.mu.Lock()
 			turn.result = processResult
-			if turn.expectedSession != "" && turn.summary.SessionID == "" {
-				turn.summary.SessionID = turn.expectedSession
-			}
 			turn.mu.Unlock()
 			if turn.transcriptPath != "" {
 				writer := a.TranscriptWriter
@@ -642,6 +643,18 @@ func (a *Adapter) consumeTurn(s *session, turn *turn) {
 		default:
 		}
 		_ = turn.process.WaitForOutput(context.Background())
+	}
+}
+
+func (a *Adapter) drainTurnOutput(turn *turn) {
+	for _, line := range turn.process.DrainStdoutLines() {
+		turn.mu.Lock()
+		_ = turn.summary.AddLine(line)
+		sessionID := turn.summary.SessionID
+		turn.mu.Unlock()
+		if sessionID != "" {
+			turn.readyOnce.Do(func() { close(turn.ready) })
+		}
 	}
 }
 
@@ -681,30 +694,42 @@ func (s *session) terminalResult(turn *turn) ExecutionResult {
 	processResult := turn.result
 	transcriptWritten := turn.transcriptWritten
 	turn.mu.Unlock()
+	observedSessionID := summary.SessionID
+	// The provider session ID is local resume authority. Only an initial or
+	// expected matching response may update it; a mismatching resume response
+	// remains visible in returned evidence without becoming the ID used by a
+	// later Send.
+	if observedSessionID != "" && (turn.expectedSession == "" || observedSessionID == turn.expectedSession) {
+		s.providerSessionID = observedSessionID
+	}
 	if processResult.Cancelled {
 		status := "cancelled"
 		reason := "process_cancelled"
 		if processResult.TimedOut {
 			status, reason = "timed_out", "process_timeout"
 		}
-		return s.resultLocked(status, reason, true, summary, processResult, transcriptWritten)
+		return s.resultLocked(status, reason, true, summary, processResult, transcriptWritten, observedSessionID)
 	}
 	if processResult.ExitCode != 0 {
-		return s.resultLocked("failed", "process_exit", true, summary, processResult, transcriptWritten)
+		return s.resultLocked("failed", "process_exit", true, summary, processResult, transcriptWritten, observedSessionID)
 	}
 	if summary.SessionID == "" {
-		return s.resultLocked("failed", "session_identity_missing", true, summary, processResult, transcriptWritten)
+		return s.resultLocked("failed", "session_identity_missing", true, summary, processResult, transcriptWritten, "")
 	}
 	if turn.expectedSession != "" && summary.SessionID != turn.expectedSession {
-		return s.resultLocked("contaminated", "session_identity_mismatch", true, summary, processResult, transcriptWritten)
+		s.contaminated = true
+		return s.resultLocked("contaminated", "session_identity_mismatch", true, summary, processResult, transcriptWritten, observedSessionID)
+	}
+	if providerTerminalError(summary.TerminalStatus) {
+		return s.resultLocked("failed", "provider_terminal_error", true, summary, processResult, transcriptWritten, observedSessionID)
 	}
 	if !summary.Terminal {
-		return s.resultLocked("failed", "terminal_event_missing", true, summary, processResult, transcriptWritten)
+		return s.resultLocked("failed", "terminal_event_missing", true, summary, processResult, transcriptWritten, observedSessionID)
 	}
 	if !summary.DeliveryComplete() {
-		return s.resultLocked("failed", "delivery_missing", true, summary, processResult, transcriptWritten)
+		return s.resultLocked("failed", "delivery_missing", true, summary, processResult, transcriptWritten, observedSessionID)
 	}
-	return s.resultLocked("completed", "terminal_and_final_delivery", true, summary, processResult, transcriptWritten)
+	return s.resultLocked("completed", "terminal_and_final_delivery", true, summary, processResult, transcriptWritten, observedSessionID)
 }
 
 func (s *session) result(status, reason string, terminal bool) ExecutionResult {
@@ -713,7 +738,7 @@ func (s *session) result(status, reason string, terminal bool) ExecutionResult {
 	return ExecutionResult{Status: status, Reason: reason, ProviderHandle: s.providerHandle, ProviderSessionID: s.providerSessionID, Terminal: terminal, ExecutionStarted: boolPtr(true), SideEffectState: "unknown", Identity: identityMap(s), TaskCanary: s.request.TaskCanary, TranscriptPath: s.request.TranscriptPath}
 }
 
-func (s *session) resultLocked(status, reason string, terminal bool, summary cli.StreamSummary, processResult cli.Result, transcriptWritten bool) ExecutionResult {
+func (s *session) resultLocked(status, reason string, terminal bool, summary cli.StreamSummary, processResult cli.Result, transcriptWritten bool, observedSessionID string) ExecutionResult {
 	refs := make([]string, 0, len(summary.Events)+1)
 	for _, event := range summary.Events {
 		refs = append(refs, fmt.Sprintf("stream:event:%d", event.Sequence))
@@ -721,17 +746,38 @@ func (s *session) resultLocked(status, reason string, terminal bool, summary cli
 	if s.request.TranscriptPath != "" && transcriptWritten {
 		refs = append(refs, "transcript:"+s.request.TranscriptPath)
 	}
-	if summary.SessionID != "" {
-		s.providerSessionID = summary.SessionID
+	identitySessionID := s.providerSessionID
+	if strings.TrimSpace(observedSessionID) != "" {
+		identitySessionID = observedSessionID
 	}
-	return ExecutionResult{Status: status, Reason: reason, ProviderHandle: s.providerHandle, ProviderSessionID: s.providerSessionID, Terminal: terminal, ExecutionStarted: boolPtr(true), SideEffectState: sideEffectFor(status), Identity: identityMap(s), TaskCanary: s.request.TaskCanary, FinalText: summary.FinalText, FinalSource: summary.FinalSource, RawEventRefs: refs, TranscriptPath: s.request.TranscriptPath, TranscriptWritten: transcriptWritten, ExitCode: processResult.ExitCode, Stdout: append([]byte(nil), processResult.Stdout...), Stderr: append([]byte(nil), processResult.Stderr...)}
+	return ExecutionResult{Status: status, Reason: reason, ProviderHandle: s.providerHandle, ProviderSessionID: identitySessionID, Terminal: terminal, ExecutionStarted: boolPtr(true), SideEffectState: sideEffectFor(status), Identity: identityMapFor(s, identitySessionID), TaskCanary: s.request.TaskCanary, FinalText: summary.FinalText, FinalSource: summary.FinalSource, RawEventRefs: refs, TranscriptPath: s.request.TranscriptPath, TranscriptWritten: transcriptWritten, ExitCode: processResult.ExitCode, Stdout: append([]byte(nil), processResult.Stdout...), Stderr: append([]byte(nil), processResult.Stderr...)}
 }
 
 func identityMap(s *session) map[string]string {
-	if strings.TrimSpace(s.providerSessionID) == "" {
+	return identityMapFor(s, s.providerSessionID)
+}
+
+func identityMapFor(s *session, sessionID string) map[string]string {
+	if strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
-	return map[string]string{"provider": Provider, "session": s.providerSessionID, "workspace": s.request.Workspace}
+	return map[string]string{"provider": Provider, "session": sessionID, "workspace": s.request.Workspace}
+}
+
+func (s *session) rollbackSend(actionID string) {
+	s.mu.Lock()
+	delete(s.sendActions, actionID)
+	s.sendInFlight = false
+	s.mu.Unlock()
+}
+
+func providerTerminalError(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "error", "failed", "failure", "cancelled", "canceled", "aborted":
+		return true
+	default:
+		return false
+	}
 }
 
 func sideEffectFor(status string) string {

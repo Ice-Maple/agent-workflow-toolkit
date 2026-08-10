@@ -733,17 +733,12 @@ func (a *Adapter) startTurn(ctx context.Context, request LaunchRequest, args []s
 
 func (a *Adapter) consumeTurn(s *session, turn *turn) {
 	for {
-		for _, line := range turn.process.DrainStdoutLines() {
-			turn.mu.Lock()
-			_ = turn.summary.AddLine(line)
-			sessionID := turn.summary.SessionID
-			turn.mu.Unlock()
-			if sessionID != "" {
-				turn.readyOnce.Do(func() { close(turn.ready) })
-			}
-		}
+		a.drainTurnOutput(turn)
 		select {
 		case <-turn.process.Finished():
+			// The runner flushes collector lines before closing Finished; consume
+			// that final batch before terminal/final delivery classification.
+			a.drainTurnOutput(turn)
 			processResult := turn.process.Wait()
 			turn.mu.Lock()
 			turn.result = processResult
@@ -763,6 +758,18 @@ func (a *Adapter) consumeTurn(s *session, turn *turn) {
 		default:
 		}
 		_ = turn.process.WaitForOutput(context.Background())
+	}
+}
+
+func (a *Adapter) drainTurnOutput(turn *turn) {
+	for _, line := range turn.process.DrainStdoutLines() {
+		turn.mu.Lock()
+		_ = turn.summary.AddLine(line)
+		sessionID := turn.summary.SessionID
+		turn.mu.Unlock()
+		if sessionID != "" {
+			turn.readyOnce.Do(func() { close(turn.ready) })
+		}
 	}
 }
 

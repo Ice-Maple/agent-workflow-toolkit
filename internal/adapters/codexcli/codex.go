@@ -1002,17 +1002,12 @@ func (a *Adapter) startTurn(ctx context.Context, request LaunchRequest, args []s
 
 func (a *Adapter) consumeTurn(s *session, turn *turn) {
 	for {
-		for _, line := range turn.process.DrainStdoutLines() {
-			turn.mu.Lock()
-			_ = turn.summary.AddLine(line)
-			sessionID := turn.summary.SessionID
-			turn.mu.Unlock()
-			if sessionID != "" {
-				turn.readyOnce.Do(func() { close(turn.ready) })
-			}
-		}
+		a.drainTurnOutput(turn)
 		select {
 		case <-turn.process.Finished():
+			// Drain the runner's flushed final batch before reading durable
+			// delivery and classifying the completed turn.
+			a.drainTurnOutput(turn)
 			processResult := turn.process.Wait()
 			lastMessage, lastMessageReadErr := readLastMessage(turn.lastMessagePath)
 			turn.mu.Lock()
@@ -1048,6 +1043,18 @@ func (a *Adapter) consumeTurn(s *session, turn *turn) {
 		default:
 		}
 		_ = turn.process.WaitForOutput(context.Background())
+	}
+}
+
+func (a *Adapter) drainTurnOutput(turn *turn) {
+	for _, line := range turn.process.DrainStdoutLines() {
+		turn.mu.Lock()
+		_ = turn.summary.AddLine(line)
+		sessionID := turn.summary.SessionID
+		turn.mu.Unlock()
+		if sessionID != "" {
+			turn.readyOnce.Do(func() { close(turn.ready) })
+		}
 	}
 }
 

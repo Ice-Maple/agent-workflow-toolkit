@@ -46,7 +46,7 @@ func TestRealCodexDeliverySmoke(t *testing.T) {
 	}
 	t.Logf("status=%s reason=%s source=%s exit_code=%d final_bytes=%d stdout_bytes=%d", result.Status, result.Reason, result.Source, result.ExitCode, len(result.FinalText), len(result.Stdout))
 	if result.Status != StatusCompleted || result.FinalText != "ADAPTER_SMOKE_OK" {
-		t.Fatalf("Codex delivery was not completed: %#v", result)
+		t.Fatalf("Codex delivery was not completed: status=%s reason=%s source=%s exit_code=%d final_bytes=%d", result.Status, result.Reason, result.Source, result.ExitCode, len(result.FinalText))
 	}
 }
 
@@ -115,7 +115,7 @@ func TestRealCodexAdapterLifecycleSmoke(t *testing.T) {
 	terminal := observeRealCodexLifecycle(t, adapter, requestContext, running.ProviderHandle)
 	t.Logf("version=%s launch_status=%s launch_thread_present=%t terminal_status=%s terminal_reason=%s final_source=%s terminal=%t exit_code=%d final_bytes=%d durable_last_message=%t transcript=%t", preflight.Version, running.Status, running.ProviderSessionID != "", terminal.Status, terminal.Reason, terminal.FinalSource, terminal.Terminal, terminal.ExitCode, len(terminal.FinalText), terminal.LastMessageAvailable, terminal.TranscriptWritten)
 	if running.Status != "running" || running.ProviderSessionID == "" || terminal.Status != "completed" || terminal.Reason != "terminal_and_final_delivery" || terminal.FinalText != "ADAPTER_SMOKE_OK" || !terminal.Terminal {
-		t.Fatalf("real Codex Adapter lifecycle delivery was not completed: launch=%#v terminal=%#v", running, terminal)
+		t.Fatalf("real Codex Adapter lifecycle delivery was not completed: launch_status=%s launch_session_present=%t terminal_status=%s terminal_reason=%s final_source=%s terminal=%t exit_code=%d final_bytes=%d durable_last_message=%t transcript=%t", running.Status, running.ProviderSessionID != "", terminal.Status, terminal.Reason, terminal.FinalSource, terminal.Terminal, terminal.ExitCode, len(terminal.FinalText), terminal.LastMessageAvailable, terminal.TranscriptWritten)
 	}
 }
 
@@ -141,7 +141,7 @@ func observeRealCodexLifecycle(t *testing.T, adapter *Adapter, ctx context.Conte
 			cancelContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, _ = adapter.Cancel(cancelContext, CancelRequest{HandleID: handle})
 			cancel()
-			t.Fatalf("real Codex Adapter observe timed out: %#v", latest)
+			t.Fatalf("real Codex Adapter observe timed out: status=%s reason=%s session_present=%t terminal=%t", latest.Status, latest.Reason, latest.ProviderSessionID != "", latest.Terminal)
 		case <-ticker.C:
 		}
 	}

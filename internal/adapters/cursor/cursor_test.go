@@ -205,6 +205,75 @@ func TestCoreAuthorizedSendResumesTheVerifiedSession(t *testing.T) {
 	}
 }
 
+func TestSendRejectsFollowUpWhileAnotherSendIsInFlight(t *testing.T) {
+	workspace := t.TempDir()
+	adapter := New(os.Args[0])
+	adapter.Environment = []string{"CURSOR_ADAPTER_HELPER=1"}
+	adapter.StartupTimeout = 2 * time.Second
+	running, err := adapter.Launch(t.Context(), LaunchRequest{Workspace: workspace, Model: "fixture-model", Mode: "plan", Permission: "read-only", TrustAuthorized: true, Prompt: "first", TaskCanary: "canary-concurrent-send"})
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	_ = waitForTerminal(t, adapter, running.ProviderHandle)
+	session, err := adapter.findSession(running.ProviderHandle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.mu.Lock()
+	session.sendInFlight = true
+	session.mu.Unlock()
+	if _, err := adapter.Send(t.Context(), SendRequest{HandleID: running.ProviderHandle, ActionID: "action-concurrent-send", Prompt: "must wait", CoreAuthorized: true, TaskCanary: "canary-concurrent-send"}); err == nil || !strings.Contains(err.Error(), "already has a follow-up in flight") {
+		t.Fatalf("concurrent Send() error = %v", err)
+	}
+	session.mu.Lock()
+	session.sendInFlight = false
+	session.mu.Unlock()
+	followUp, err := adapter.Send(t.Context(), SendRequest{HandleID: running.ProviderHandle, ActionID: "action-concurrent-send", Prompt: "resume after guard", CoreAuthorized: true, TaskCanary: "canary-concurrent-send"})
+	if err != nil {
+		t.Fatalf("guarded ActionID was not reusable: %v", err)
+	}
+	terminal := waitForTerminal(t, adapter, followUp.ProviderHandle)
+	if terminal.Status != "completed" || terminal.Reason != "terminal_and_final_delivery" {
+		t.Fatalf("follow-up terminal = %#v", terminal)
+	}
+}
+
+func TestResumeWithoutSessionIdentityFails(t *testing.T) {
+	workspace := t.TempDir()
+	adapter := New(os.Args[0])
+	adapter.Environment = []string{"CURSOR_ADAPTER_HELPER=1"}
+	adapter.StartupTimeout = 2 * time.Second
+	running, err := adapter.Launch(t.Context(), LaunchRequest{Workspace: workspace, Model: "fixture-model", Mode: "plan", Permission: "read-only", TrustAuthorized: true, Prompt: "first", TaskCanary: "canary-missing-session"})
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	_ = waitForTerminal(t, adapter, running.ProviderHandle)
+	adapter.Environment = []string{"CURSOR_ADAPTER_HELPER=1", "CURSOR_ADAPTER_HELPER_MODE=no-session-on-resume"}
+	followUp, err := adapter.Send(t.Context(), SendRequest{HandleID: running.ProviderHandle, ActionID: "action-missing-session", Prompt: "resume without identity", CoreAuthorized: true, TaskCanary: "canary-missing-session"})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	terminal := waitForTerminal(t, adapter, followUp.ProviderHandle)
+	if terminal.Status != "failed" || terminal.Reason != "session_identity_missing" || terminal.ProviderSessionID != running.ProviderSessionID {
+		t.Fatalf("missing-session result = %#v", terminal)
+	}
+}
+
+func TestProviderTerminalErrorIsClassified(t *testing.T) {
+	workspace := t.TempDir()
+	adapter := New(os.Args[0])
+	adapter.Environment = []string{"CURSOR_ADAPTER_HELPER=1", "CURSOR_ADAPTER_HELPER_MODE=provider-error"}
+	adapter.StartupTimeout = 2 * time.Second
+	running, err := adapter.Launch(t.Context(), LaunchRequest{Workspace: workspace, Model: "fixture-model", Mode: "plan", Permission: "read-only", TrustAuthorized: true, Prompt: "provider error", TaskCanary: "canary-provider-error"})
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	terminal := waitForTerminal(t, adapter, running.ProviderHandle)
+	if terminal.Status != "failed" || terminal.Reason != "provider_terminal_error" || terminal.FinalText != "" {
+		t.Fatalf("provider-error result = %#v", terminal)
+	}
+}
+
 func TestSendReleasesActionIDWhenProcessStartFails(t *testing.T) {
 	workspace := t.TempDir()
 	adapter := New(os.Args[0])
@@ -228,6 +297,41 @@ func TestSendReleasesActionIDWhenProcessStartFails(t *testing.T) {
 	terminal := waitForTerminal(t, adapter, followUp.ProviderHandle)
 	if terminal.Status != "completed" || terminal.Reason != "terminal_and_final_delivery" {
 		t.Fatalf("retry terminal = %#v", terminal)
+	}
+}
+
+func TestMismatchedResumeSessionIsContaminatedWithoutReplacingResumeAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	adapter := New(os.Args[0])
+	adapter.Environment = []string{"CURSOR_ADAPTER_HELPER=1"}
+	adapter.StartupTimeout = 2 * time.Second
+	running, err := adapter.Launch(t.Context(), LaunchRequest{Workspace: workspace, Model: "fixture-model", Mode: "plan", Permission: "read-only", TrustAuthorized: true, Prompt: "first", TaskCanary: "canary-contaminated"})
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	_ = waitForTerminal(t, adapter, running.ProviderHandle)
+	adapter.Environment = []string{"CURSOR_ADAPTER_HELPER=1", "CURSOR_ADAPTER_HELPER_MODE=mismatched-session"}
+	followUp, err := adapter.Send(t.Context(), SendRequest{HandleID: running.ProviderHandle, ActionID: "action-contaminated", Prompt: "resume", CoreAuthorized: true, TaskCanary: "canary-contaminated"})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	contaminated := waitForTerminal(t, adapter, followUp.ProviderHandle)
+	if contaminated.Status != "contaminated" || contaminated.Reason != "session_identity_mismatch" || contaminated.ProviderSessionID != "cursor-foreign-session" || contaminated.Identity["session"] != "cursor-foreign-session" {
+		t.Fatalf("contaminated result = %#v", contaminated)
+	}
+	session, err := adapter.findSession(running.ProviderHandle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.mu.Lock()
+	authoritySession := session.providerSessionID
+	contaminatedLatch := session.contaminated
+	session.mu.Unlock()
+	if authoritySession != "cursor-session-1" || !contaminatedLatch {
+		t.Fatalf("mismatched provider session changed local authority or latch: authority=%q contaminated=%t", authoritySession, contaminatedLatch)
+	}
+	if _, err := adapter.Send(t.Context(), SendRequest{HandleID: running.ProviderHandle, ActionID: "action-after-contamination", Prompt: "must be rejected", CoreAuthorized: true, TaskCanary: "canary-contaminated"}); err == nil {
+		t.Fatal("Send() was accepted after session contamination")
 	}
 }
 
@@ -311,6 +415,20 @@ func TestMain(m *testing.M) {
 	if os.Getenv("CURSOR_ADAPTER_HELPER") == "1" {
 		if os.Getenv("CURSOR_ADAPTER_HELPER_MODE") == "no-session-sleep" {
 			time.Sleep(30 * time.Second)
+			os.Exit(0)
+		}
+		if os.Getenv("CURSOR_ADAPTER_HELPER_MODE") == "mismatched-session" && contains(os.Args[1:], "--resume") {
+			fmt.Println(`{"type":"system","subtype":"init","session_id":"cursor-foreign-session"}`)
+			fmt.Println(`{"type":"result","subtype":"success","is_error":false,"result":"FOREIGN_SESSION"}`)
+			os.Exit(0)
+		}
+		if os.Getenv("CURSOR_ADAPTER_HELPER_MODE") == "no-session-on-resume" && contains(os.Args[1:], "--resume") {
+			fmt.Println(`{"type":"result","subtype":"success","is_error":false,"result":"NO_SESSION"}`)
+			os.Exit(0)
+		}
+		if os.Getenv("CURSOR_ADAPTER_HELPER_MODE") == "provider-error" {
+			fmt.Println(`{"type":"system","subtype":"init","session_id":"cursor-session-1"}`)
+			fmt.Println(`{"type":"result","subtype":"error","is_error":true,"error":"PROVIDER_ERROR","result":"SHOULD_NOT_DELIVER"}`)
 			os.Exit(0)
 		}
 		fmt.Println(`{"type":"system","subtype":"init","session_id":"cursor-session-1"}`)

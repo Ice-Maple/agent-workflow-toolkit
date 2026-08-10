@@ -14,8 +14,9 @@
 | 降低 Codex 自动压缩后的遗忘和重复执行 | Hook 运行包 | [`tests/context_continuity/fixtures/wave3/hooks.example.json`](../../tests/context_continuity/fixtures/wave3/hooks.example.json) | Wave 3 脚本级实现；真实 App 宿主仍待验证 |
 | 验证上下文连续性 Hook 的本地行为 | 测试/CLI smoke | [`tests/context_continuity/README.md`](../../tests/context_continuity/README.md) | Wave 0–3 回归和本地 smoke 已有 |
 | 校验多 Agent 协同请求/响应协议 | Go CLI + Protocol | [`cmd/agent-workflow-core/main.go`](../../cmd/agent-workflow-core/main.go) | Wave 0 协议骨架 |
-| 接入 Cursor Agent 外部 Adapter | Go Adapter | [`internal/adapters/cursor/cursor.go`](../../internal/adapters/cursor/cursor.go) | Wave 3 首个只读 Windows 路径已实现并完成真实 smoke；等待独立 review/checkpoint |
-| 接入 Codex CLI 外部 Adapter | Go Adapter | [`internal/adapters/codexcli/codex.go`](../../internal/adapters/codexcli/codex.go) | 有实现和回归测试；真实 Provider smoke 需显式开启 |
+| 接入 Cursor Agent 外部 Adapter | Go Adapter | [`internal/adapters/cursor/cursor.go`](../../internal/adapters/cursor/cursor.go) | Wave 3 只读 Windows 路径已完成真实 smoke、独立 review 和 targeted closure；尚未标记 `experimental` |
+| 接入 Claude Code 外部 Adapter | Go Adapter | [`internal/adapters/claude/claude.go`](../../internal/adapters/claude/claude.go) | Wave 3 只读路径已完成真实 smoke、独立 review 和 targeted closure；尚未标记 `experimental` |
+| 接入 Codex CLI 外部 Adapter | Go Adapter | [`internal/adapters/codexcli/codex.go`](../../internal/adapters/codexcli/codex.go) | Wave 3 只读路径已完成真实 smoke、独立 review 和 targeted closure；尚未标记 `experimental` |
 | 了解多 Agent MVP 的整体设计和 Wave | 设计/计划 | [`docs/plans/2026-08-07-multi-agent-orchestration-mvp-waves.md`](../plans/2026-08-07-multi-agent-orchestration-mvp-waves.md) | 计划与实现并行演进，不是直接运行入口 |
 
 ## 各功能的实际入口
@@ -77,8 +78,9 @@ SubagentStop    → subagent_stop.py
 - 设计与计划：[`docs/brainstorms/2026-08-07-multi-agent-orchestration-mvp.md`](../brainstorms/2026-08-07-multi-agent-orchestration-mvp.md) 和 [`docs/plans/2026-08-07-multi-agent-orchestration-mvp-waves.md`](../plans/2026-08-07-multi-agent-orchestration-mvp-waves.md)
 
 `skills/multi-agent-orchestration/` Controller Skill 已完成真实 Codex App Native smoke、artifact 校验和人工批准，
-详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`；Wave2 Native MVP 已验收。Wave3 当前推进 Cursor Agent 只读路径，
-真实记录见 [`W3-cursor-adapter-smoke.md`](../../tests/orchestration/evidence/2026-08-09/W3-cursor-adapter-smoke.md)，仍未进入 `experimental` 阶段。
+详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`；Wave 2 Native MVP 已验收。Wave 3 的 Cursor Agent、
+Claude Code 和 Codex CLI 只读 Adapter 均已完成实现、真实 smoke、独立 review 和 targeted closure，记录见
+[`Wave 3 当前状态`](../../docs/reviews/2026-08-09-wave3-current-status.md)。四条路径都尚未进入 `experimental` 阶段。
 
 ## 按目录判断“这是什么”
 
@@ -97,7 +99,7 @@ SubagentStop    → subagent_stop.py
 ## 当前仍存在的整理缺口
 
 1. 上下文连续性只有 Hook 入口，没有对应的模型行为 Skill。
-2. 多 Agent Wave 2 的 Controller Skill、fake contract、真实 Native smoke 和 reviewer 人工批准已落地；Wave3 已开始 Cursor Agent 首个 Adapter slice，Claude Code/Codex CLI 尚未接入。
+2. 多 Agent Wave 2 Native MVP 与 Wave 3 三个外部 Adapter 已完成；Wave 4 已建立共享 replay/conformance 基线，当前缺口是完整 smoke matrix、性能/稳定性/安全证据和 `experimental` 验收。
 3. 以前各功能按各自 Wave 逐步加入，暂时没有统一的 capability manifest 或根级入口索引。
 
 因此，今后新增功能至少应同时登记：
@@ -110,11 +112,9 @@ SubagentStop    → subagent_stop.py
 - 当前成熟度和未验证边界。
 
 本文件就是当前仓库的统一导航页；它不是新的运行时依赖，也不会改变现有 Skill、Hook 或 CLI 路径。
-## Wave 3 external Adapter status update (2026-08-09)
+## Wave 4 status update (2026-08-10)
 
-The Cursor Agent read-only Adapter and the Claude Code read-only Adapter have
-each completed implementation, real smoke, independent Cursor review and
-targeted closure. Their evidence is [`W3-cursor-adapter-smoke.md`](../../tests/orchestration/evidence/2026-08-09/W3-cursor-adapter-smoke.md)
-and [`W3-claude-adapter-smoke.md`](../../tests/orchestration/evidence/2026-08-09/W3-claude-adapter-smoke.md);
-the per-Adapter review records are under `docs/reviews/`. Neither path is
-declared `experimental`. Codex CLI remains the next Wave 3 Adapter slice.
+Wave 3 的三个外部 Adapter 已关闭实现和 review checkpoint，但尚未声明
+`experimental`。Wave 4 当前从共享 JSONL replay、跨 Adapter lifecycle
+conformance 和证据矩阵基线开始，详细范围见
+[`Wave 4 baseline`](../../docs/reviews/2026-08-10-wave4-baseline.md)。
