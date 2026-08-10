@@ -315,6 +315,16 @@ func TestMismatchedResumeSessionIsContaminatedWithoutReplacingAuthority(t *testi
 	if contaminated.Status != "contaminated" || contaminated.Reason != "session_identity_mismatch" || contaminated.ProviderSessionID != "codex-foreign-thread" || contaminated.Identity["session"] != "codex-foreign-thread" {
 		t.Fatalf("contaminated result = %#v", contaminated)
 	}
+	session, err := adapter.findSession(running.ProviderHandle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.mu.Lock()
+	authoritySession := session.providerSessionID
+	session.mu.Unlock()
+	if authoritySession != "codex-thread-1" {
+		t.Fatalf("mismatched provider session replaced local resume authority: %q", authoritySession)
+	}
 	if _, err := adapter.Send(t.Context(), SendRequest{HandleID: running.ProviderHandle, ActionID: "core-send-after-contamination", Prompt: "must be rejected", CoreAuthorized: true, TaskCanary: "canary-contaminated"}); err == nil {
 		t.Fatal("Send() was accepted after session contamination")
 	}

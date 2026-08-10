@@ -51,3 +51,38 @@ func TestStageReplacesExistingArtifactAtomically(t *testing.T) {
 		t.Fatalf("replaced artifact = %q, err=%v", raw, err)
 	}
 }
+
+func TestStageRecoversInterruptedPreviousArtifactBeforeReplacement(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "review.md")
+	if err := os.WriteFile(path+".previous", []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Stage(workspace, path, "markdown", "new", nil); err != nil {
+		t.Fatalf("recovery replace error = %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || string(raw) != "new" {
+		t.Fatalf("recovered artifact = %q, err=%v", raw, err)
+	}
+	if _, err := os.Stat(path + ".previous"); !os.IsNotExist(err) {
+		t.Fatalf("stale previous artifact remains, err=%v", err)
+	}
+}
+
+func TestStageRemovesStalePreviousAfterSuccessfulReplacement(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "review.md")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".previous", []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Stage(workspace, path, "markdown", "new", nil); err != nil {
+		t.Fatalf("stale backup replace error = %v", err)
+	}
+	if _, err := os.Stat(path + ".previous"); !os.IsNotExist(err) {
+		t.Fatalf("stale previous artifact remains, err=%v", err)
+	}
+}

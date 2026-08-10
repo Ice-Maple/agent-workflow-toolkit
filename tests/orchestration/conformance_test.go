@@ -28,6 +28,7 @@ type lifecycleCase struct {
 	name      string
 	preflight func(context.Context) (string, error)
 	launch    func(context.Context) (lifecycleResult, error)
+	send      func(context.Context, string) (lifecycleResult, error)
 	observe   func(context.Context, string) (lifecycleResult, error)
 	cleanup   func(string) error
 }
@@ -80,7 +81,32 @@ func TestWave4ExternalAdapterLifecycleConformance(t *testing.T) {
 			if terminal.sessionID != running.sessionID {
 				t.Fatalf("session changed from %q to %q", running.sessionID, terminal.sessionID)
 			}
-			if err := adapterCase.cleanup(running.handle); err != nil {
+
+			followUp, err := adapterCase.send(ctx, running.handle)
+			if err != nil {
+				t.Fatalf("follow-up send error = %v", err)
+			}
+			if followUp.handle == "" || followUp.sessionID != running.sessionID || followUp.status != "running" {
+				t.Fatalf("follow-up running result = %#v", followUp)
+			}
+			for {
+				followUp, err = adapterCase.observe(ctx, followUp.handle)
+				if err != nil {
+					t.Fatalf("follow-up observe error = %v", err)
+				}
+				if followUp.terminal {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatalf("follow-up observe did not reach terminal result: %#v", followUp)
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			if followUp.status != "completed" || followUp.finalText != wave4SmokeToken || followUp.sessionID != running.sessionID || followUp.reason == "" {
+				t.Fatalf("follow-up terminal result = %#v", followUp)
+			}
+			if err := adapterCase.cleanup(followUp.handle); err != nil {
 				t.Fatalf("cleanup error = %v", err)
 			}
 		})
@@ -99,6 +125,10 @@ func newCursorLifecycleCase(t *testing.T) lifecycleCase {
 		},
 		launch: func(ctx context.Context) (lifecycleResult, error) {
 			result, err := adapter.Launch(ctx, cursor.LaunchRequest{Workspace: workspace, Model: "fixture-model", Mode: "plan", Permission: "read-only", TrustAuthorized: true, Prompt: "return the smoke token", TaskCanary: "wave4-cursor-canary"})
+			return lifecycleResult{status: result.Status, reason: result.Reason, handle: result.ProviderHandle, sessionID: result.ProviderSessionID, finalText: result.FinalText, terminal: result.Terminal}, err
+		},
+		send: func(ctx context.Context, handle string) (lifecycleResult, error) {
+			result, err := adapter.Send(ctx, cursor.SendRequest{HandleID: handle, ActionID: "wave4-cursor-follow-up", Prompt: "return the smoke token again", CoreAuthorized: true, TaskCanary: "wave4-cursor-canary"})
 			return lifecycleResult{status: result.Status, reason: result.Reason, handle: result.ProviderHandle, sessionID: result.ProviderSessionID, finalText: result.FinalText, terminal: result.Terminal}, err
 		},
 		observe: func(ctx context.Context, handle string) (lifecycleResult, error) {
@@ -123,6 +153,10 @@ func newClaudeLifecycleCase(t *testing.T) lifecycleCase {
 			result, err := adapter.Launch(ctx, claude.LaunchRequest{Workspace: workspace, Model: "fixture-model", Permission: "read-only", TrustAuthorized: true, DisableTools: true, Prompt: "return the smoke token", TaskCanary: "wave4-claude-canary"})
 			return lifecycleResult{status: result.Status, reason: result.Reason, handle: result.ProviderHandle, sessionID: result.ProviderSessionID, finalText: result.FinalText, terminal: result.Terminal}, err
 		},
+		send: func(ctx context.Context, handle string) (lifecycleResult, error) {
+			result, err := adapter.Send(ctx, claude.SendRequest{HandleID: handle, ActionID: "wave4-claude-follow-up", Prompt: "return the smoke token again", CoreAuthorized: true, TaskCanary: "wave4-claude-canary"})
+			return lifecycleResult{status: result.Status, reason: result.Reason, handle: result.ProviderHandle, sessionID: result.ProviderSessionID, finalText: result.FinalText, terminal: result.Terminal}, err
+		},
 		observe: func(ctx context.Context, handle string) (lifecycleResult, error) {
 			result, err := adapter.Observe(ctx, claude.ObserveRequest{HandleID: handle})
 			return lifecycleResult{status: result.Status, reason: result.Reason, handle: result.ProviderHandle, sessionID: result.ProviderSessionID, finalText: result.FinalText, terminal: result.Terminal}, err
@@ -143,6 +177,10 @@ func newCodexLifecycleCase(t *testing.T) lifecycleCase {
 		},
 		launch: func(ctx context.Context) (lifecycleResult, error) {
 			result, err := adapter.Launch(ctx, codexcli.LaunchRequest{Workspace: workspace, Model: "fixture-model", Permission: "read-only", Sandbox: "read-only", Approval: "untrusted", TrustAuthorized: true, OutputLastMessagePath: filepath.Join(workspace, "last-message.txt"), Prompt: "return the smoke token", TaskCanary: "wave4-codex-canary"})
+			return lifecycleResult{status: result.Status, reason: result.Reason, handle: result.ProviderHandle, sessionID: result.ProviderSessionID, finalText: result.FinalText, terminal: result.Terminal}, err
+		},
+		send: func(ctx context.Context, handle string) (lifecycleResult, error) {
+			result, err := adapter.Send(ctx, codexcli.SendRequest{HandleID: handle, ActionID: "wave4-codex-follow-up", Prompt: "return the smoke token again", CoreAuthorized: true, TaskCanary: "wave4-codex-canary"})
 			return lifecycleResult{status: result.Status, reason: result.Reason, handle: result.ProviderHandle, sessionID: result.ProviderSessionID, finalText: result.FinalText, terminal: result.Terminal}, err
 		},
 		observe: func(ctx context.Context, handle string) (lifecycleResult, error) {

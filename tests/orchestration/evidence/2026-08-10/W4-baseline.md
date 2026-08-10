@@ -2,7 +2,7 @@
 
 - Date: 2026-08-10
 - Scope: shared external CLI lifecycle and JSONL delivery replay
-- Status: baseline and Cursor follow-up passed with conditions; Wave 4 and `experimental` acceptance remain open
+- Status: four-path smoke baseline passed with conditions; remaining Wave 4 and `experimental` acceptance work stays open
 
 ## Deterministic replay
 
@@ -23,10 +23,12 @@ code alone.
 ## Cross-Adapter lifecycle
 
 `TestWave4ExternalAdapterLifecycleConformance` passed for Cursor, Claude Code
-and Codex CLI using one fixture-process harness per provider. Each case covered:
+and Codex CLI using one fixture-process harness per provider. Each case covered
+one same-session follow-up delivery in addition to the initial path:
 
 ```text
-preflight → launch → session continuity → observe → terminal/final delivery → cleanup
+preflight → launch → session continuity → observe → terminal/final delivery
+→ same-session follow-up → terminal/final delivery → cleanup
 ```
 
 The assertions use the common lifecycle shape rather than provider-specific
@@ -41,14 +43,18 @@ were delivered to the adapter, producing a false `terminal_event_missing`.
 The shared runner now assigns custom stdout/stderr collectors to `exec.Cmd`,
 so `cmd.Wait()` waits for the copy goroutines before publishing `Finished` and
 the final unterminated line is flushed. `TestRunnerDrainsAllFastOutputLinesBeforeFinished`
-locks the three-line burst case and `TestRunnerFlushesUnterminatedOutputBeforeFinished`
-locks the no-newline flush path.
+locks the three-line burst case; `TestRunnerFlushesUnterminatedOutputBeforeFinished`
+and `TestRunnerFlushesUnterminatedStdoutAndStderrWithCR` lock no-newline flushes;
+`TestRunnerCapturesLongOutputWithoutTruncation` covers 256 KiB stdout plus
+128 KiB stderr; `TestRunnerRepeatedCancelIsStable` covers injected tree-kill,
+timeout evidence and an idempotent second cancellation.
 
 ## Verification
 
 ```text
 go test -count=1 ./...                                                       PASS
 go test -count=10 ./internal/adapters/cli ./internal/adapters/claude ./internal/adapters/cursor ./internal/adapters/codexcli  PASS
+go test -count=10 ./internal/adapters/artifact ./internal/policy ./tests/orchestration  PASS
 go test -count=3 ./tests/orchestration                                      PASS
 go vet ./...                                                               PASS
 go build ./...                                                             PASS
@@ -59,6 +65,22 @@ git diff --check                                                           PASS
 `CGO_ENABLED=0` (`go test -race` rejects the run before compilation); no `gcc`
 is available for enabling it.
 
+## Automated Wave 4 follow-up
+
+- Artifact: `TestStageRecoversInterruptedPreviousArtifactBeforeReplacement`
+  and `TestStageRemovesStalePreviousAfterSuccessfulReplacement` pass; the
+  implementation restores `.previous` after an interrupted Windows replace
+  and removes stale backup state after a successful install.
+- Policy: `TestWave4PolicyMatrixFailsClosed` covers unregistered binding,
+  permission expansion, MCP expansion without isolation, goal scope wildcard
+  or overreach, and fallback scope expansion.
+- Adapter symmetry: Claude and Codex now have explicit concurrent follow-up,
+  missing-identity and provider-terminal-error regressions; Codex also asserts
+  that a foreign resume response does not replace local authority.
+- Remaining work is cross-Adapter contamination/recovery fault injection,
+  complete benchmark dimensions, and race-enabled verification; no item here
+  changes the manual `experimental` confirmation boundary.
+
 ## Real Cursor follow-up
 
 The follow-up task executed the real Cursor Agent path with the explicit
@@ -67,22 +89,31 @@ The follow-up task executed the real Cursor Agent path with the explicit
 - `TestRealCursorAdapterSmoke`: PASS; `status=completed`,
   `reason=terminal_and_final_delivery`, `source=result.result`,
   `session_present=true`, `terminal=true`, `exit_code=0`, `final_bytes=16`.
-- `TestRealCursorWave4Review`: PASS; initial delivery completed, the same
-  session delivered the complete report without a follow-up, and final delivery was
+- `TestRealCursorWave4Review`: PASS; initial delivery completed and the same
+  session used a core-authorized delivery follow-up; final delivery was
   `status=completed`, `reason=terminal_and_final_delivery`,
-  `source=result.result`, `terminal=true`, `exit_code=0`, `final_bytes=18525`.
+  `source=result.result`, `terminal=true`, `exit_code=0`, `final_bytes=17042`.
 - Cursor review artifact: [`2026-08-10-wave4-cursor-review.md`](../../../../docs/reviews/2026-08-10-wave4-cursor-review.md),
-  validated atomically with 18526 bytes and SHA-256
-  `c13a79013b8a380a112ce6a4ee5584f81073af975d402f3e1285acb22a1db98f`.
+  validated atomically with 17540 bytes and SHA-256
+  `00c36463851e57c841c7e6e2d3db705c33c21a4c60400c57faceab92f223e349`.
 
 The independent Cursor verdict is `PASS WITH CONDITIONS`: this baseline
-slice is not `experimental`; full four-path smoke, Windows stability,
-policy/contamination, benchmark, race-enabled verification and human
-acceptance remain open.
+slice is not `experimental`; the current four-path smoke matrix and the
+automated follow-up subset are complete, while cross-Adapter fault recovery,
+complete benchmark, race-enabled verification and human acceptance remain
+open.
 
 The four-path index is [`W4-smoke-matrix.md`](W4-smoke-matrix.md). It records
-current Cursor and Claude passes, the approved historical Native evidence, and
-the current Codex CLI authorization blocker without promoting it to success.
+current Cursor, Claude and Codex CLI passes, plus the approved historical Native
+evidence. The Codex entry requires explicit non-secret custom Provider route
+values because the Adapter intentionally ignores user-global Codex config.
+
+The earlier Codex 401 was not evidence that the local login was absent. The
+exploration command inherited `model_provider=custom`; the isolated Adapter
+adds `--ignore-user-config`, and the original smoke did not provide the custom
+Provider route, so it selected the default OpenAI endpoint. With the custom
+Provider name, base route, wire API and auth requirement supplied explicitly,
+both real Codex smokes passed. No credentials or route secrets are recorded.
 
 The initial parser/artifact measurements are recorded in
 [`W4-benchmark-baseline.md`](W4-benchmark-baseline.md); they are reference

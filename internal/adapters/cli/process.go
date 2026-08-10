@@ -228,6 +228,7 @@ func (c *outputCollector) flush() {
 		return
 	}
 	line := append([]byte(nil), c.pending...)
+	line = bytes.TrimSuffix(line, []byte{'\r'})
 	if c.stdout {
 		h.stdoutLines = append(h.stdoutLines, line)
 	} else {

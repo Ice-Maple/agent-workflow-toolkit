@@ -91,6 +91,88 @@ func TestRunnerFlushesUnterminatedOutputBeforeFinished(t *testing.T) {
 	}
 }
 
+func TestRunnerFlushesUnterminatedStdoutAndStderrWithCR(t *testing.T) {
+	handle, err := NewRunner().Start(t.Context(), Command{
+		Executable: os.Args[0],
+		Dir:        t.TempDir(),
+		Environment: []string{
+			"CLI_PROCESS_HELPER=1",
+			"CLI_PROCESS_HELPER_MODE=mixed-unterminated",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	<-handle.Finished()
+	stdout := handle.DrainStdoutLines()
+	stderr := handle.DrainStderrLines()
+	result := handle.Wait()
+	if result.ExitCode != 0 || len(stdout) != 1 || len(stderr) != 1 || string(stdout[0]) != "CLI_STDOUT_UNTERMINATED" || string(stderr[0]) != "CLI_STDERR_UNTERMINATED" {
+		t.Fatalf("process result=%#v stdout=%q stderr=%q", result, stdout, stderr)
+	}
+}
+
+func TestRunnerCapturesLongOutputWithoutTruncation(t *testing.T) {
+	handle, err := NewRunner().Start(t.Context(), Command{
+		Executable: os.Args[0],
+		Dir:        t.TempDir(),
+		Environment: []string{
+			"CLI_PROCESS_HELPER=1",
+			"CLI_PROCESS_HELPER_MODE=long",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	result := handle.Wait()
+	if result.ExitCode != 0 || len(result.Stdout) != 256*1024+1 || len(result.Stderr) != 128*1024+1 || !strings.HasSuffix(string(result.Stdout), "\n") || !strings.HasSuffix(string(result.Stderr), "\n") {
+		t.Fatalf("long output result: exit=%d stdout=%d stderr=%d", result.ExitCode, len(result.Stdout), len(result.Stderr))
+	}
+}
+
+func TestRunnerRepeatedCancelIsStable(t *testing.T) {
+	killCalls := make(chan int, 1)
+	runner := &Runner{KillTree: func(pid int) error {
+		killCalls <- pid
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			return err
+		}
+		return process.Kill()
+	}}
+	handle, err := runner.Start(t.Context(), Command{
+		Executable: os.Args[0],
+		Dir:        t.TempDir(),
+		Environment: []string{
+			"CLI_PROCESS_HELPER=1",
+			"CLI_PROCESS_HELPER_MODE=sleep",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	first := handle.CancelWithCause(context.DeadlineExceeded)
+	if !first.Requested || !first.Confirmed || first.AlreadyDone {
+		t.Fatalf("first cancel = %#v", first)
+	}
+	result := handle.Wait()
+	if !result.Cancelled || !result.TimedOut || !result.KillConfirmed {
+		t.Fatalf("cancel evidence = %#v", result)
+	}
+	second := handle.Cancel()
+	if !second.AlreadyDone || second.Requested || second.Confirmed {
+		t.Fatalf("second cancel = %#v", second)
+	}
+	select {
+	case pid := <-killCalls:
+		if pid < 1 {
+			t.Fatalf("kill pid = %d", pid)
+		}
+	default:
+		t.Fatal("injected process-tree killer was not called")
+	}
+}
+
 func TestRunnerSeparatesStartError(t *testing.T) {
 	_, err := NewRunner().Run(t.Context(), Command{Executable: `Z:\missing\agent.exe`})
 	if err == nil || !strings.Contains(err.Error(), "start external CLI") {
@@ -109,6 +191,14 @@ func TestMain(m *testing.M) {
 			fmt.Println("CLI_BURST_3")
 		case "unterminated":
 			_, _ = os.Stdout.Write([]byte("CLI_UNTERMINATED"))
+		case "mixed-unterminated":
+			_, _ = os.Stdout.Write([]byte("CLI_STDOUT_UNTERMINATED\r"))
+			_, _ = os.Stderr.Write([]byte("CLI_STDERR_UNTERMINATED\r"))
+		case "long":
+			_, _ = os.Stdout.Write([]byte(strings.Repeat("O", 256*1024)))
+			_, _ = os.Stdout.Write([]byte{'\n'})
+			_, _ = os.Stderr.Write([]byte(strings.Repeat("E", 128*1024)))
+			_, _ = os.Stderr.Write([]byte{'\n'})
 		case "sleep":
 			fmt.Println("CLI_SLEEP_STARTED")
 			time.Sleep(30 * time.Second)

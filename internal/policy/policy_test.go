@@ -163,6 +163,84 @@ func TestPreflightRejectsMissingWorkspaceAndGoalScopeRejectsWildcards(t *testing
 	}
 }
 
+func TestWave4PolicyMatrixFailsClosed(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	task, err := orchestration.NewTask("policy-matrix", "review", workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := orchestration.Binding{Role: "reviewer", Adapter: "fake", Model: "fixture", Reasoning: "none", Permission: "read-only", Workspace: workspace}
+
+	cases := []struct {
+		name  string
+		check func(t *testing.T)
+	}{
+		{
+			name: "unregistered binding",
+			check: func(t *testing.T) {
+				candidate := registered
+				candidate.Model = "unregistered"
+				decision := (Config{RegisteredBindings: []orchestration.Binding{registered}}).Preflight(task, candidate)
+				if decision.Status != "blocked" || decision.Code != "binding_not_registered" {
+					t.Fatalf("decision = %#v", decision)
+				}
+			},
+		},
+		{
+			name: "permission expansion",
+			check: func(t *testing.T) {
+				candidate := registered
+				candidate.Permission = "workspace-write"
+				decision := (Config{RegisteredBindings: []orchestration.Binding{registered}}).Preflight(task, candidate)
+				if decision.Status != "blocked" || decision.Code != "binding_not_registered" {
+					t.Fatalf("decision = %#v", decision)
+				}
+			},
+		},
+		{
+			name: "MCP expansion without isolation",
+			check: func(t *testing.T) {
+				candidate := registered
+				candidate.MCPAllowlist = []string{"evidence"}
+				config := Config{MCPIsolation: "unsupported", RegisteredBindings: []orchestration.Binding{candidate}}
+				decision := config.Preflight(task, candidate)
+				if decision.Status != "blocked" || decision.Code != "mcp_isolation_unsupported" {
+					t.Fatalf("decision = %#v", decision)
+				}
+			},
+		},
+		{
+			name: "goal scope overreach",
+			check: func(t *testing.T) {
+				node := orchestration.WorkflowNode{ID: "node-review", Kind: "review"}
+				if GoalScopeAllows([]string{"worker"}, node) {
+					t.Fatal("out-of-scope goal was accepted")
+				}
+				if err := ValidateGoalScope([]string{"*"}); err == nil {
+					t.Fatal("wildcard goal scope was accepted")
+				}
+			},
+		},
+		{
+			name: "fallback scope expansion",
+			check: func(t *testing.T) {
+				candidate := registered
+				candidate.Permission = "workspace-write"
+				decision := (Config{RegisteredBindings: []orchestration.Binding{candidate}}).DecideFallback(registered, candidate, true)
+				if decision.Status != "blocked" || decision.Code != "fallback_scope_changed" {
+					t.Fatalf("decision = %#v", decision)
+				}
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, testCase.check)
+	}
+}
+
 func TestRetryPolicyRejectsWrongEvidenceAndAllowsOnlyRegisteredBranches(t *testing.T) {
 	config := DefaultConfig()
 	preStart := orchestration.Attempt{Status: orchestration.AttemptFailed, ExecutionStarted: false, SideEffectState: "none"}

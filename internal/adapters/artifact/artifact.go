@@ -33,6 +33,9 @@ func Stage(workspace, path, format, content string, requiredSections []string) (
 	if err := ensureInside(canonicalWorkspace, artifactPath); err != nil {
 		return orchestration.ArtifactRef{}, err
 	}
+	if err := recoverPrevious(artifactPath); err != nil {
+		return orchestration.ArtifactRef{}, err
+	}
 	if _, err := os.Stat(artifactPath); err == nil {
 		resolved, resolveErr := filepath.EvalSymlinks(artifactPath)
 		if resolveErr != nil {
@@ -107,6 +110,7 @@ func atomicReplace(path string, raw []byte) error {
 		return fmt.Errorf("close artifact temporary file: %w", err)
 	}
 	if err := os.Rename(temporary, path); err == nil {
+		_ = os.Remove(path + ".previous")
 		return nil
 	}
 	// Windows does not replace an existing file with Rename. Move the old
@@ -125,5 +129,27 @@ func atomicReplace(path string, raw []byte) error {
 		return fmt.Errorf("install artifact: %w", err)
 	}
 	_ = os.Remove(backup)
+	return nil
+}
+
+// recoverPrevious restores the last complete artifact when a process was
+// interrupted after moving the destination aside but before installing the
+// replacement. A later Stage call can then perform a normal atomic replace.
+func recoverPrevious(path string) error {
+	backup := path + ".previous"
+	if _, err := os.Stat(backup); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect previous artifact: %w", err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		_ = os.Remove(backup)
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect artifact during recovery: %w", err)
+	}
+	if err := os.Rename(backup, path); err != nil {
+		return fmt.Errorf("restore previous artifact: %w", err)
+	}
 	return nil
 }

@@ -21,7 +21,7 @@ The Codex CLI delivery regression smoke is opt-in because it performs a real pro
 ```powershell
 $env:CODEX_ADAPTER_REAL_SMOKE='1'
 $env:CODEX_ADAPTER_SMOKE_WORKSPACE='E:\projects\agent-workflow-toolkit'
-$env:CODEX_ADAPTER_SMOKE_MODEL='gpt-5.6-luna'
+$env:CODEX_ADAPTER_SMOKE_MODEL='gpt-5.6-sol'
 go test -run '^TestRealCodexDeliverySmoke$' -v ./internal/adapters/codexcli
 ```
 
@@ -30,8 +30,11 @@ configuration through `CODEX_ADAPTER_SMOKE_MODEL_PROVIDER`,
 `CODEX_ADAPTER_SMOKE_PROVIDER_BASE_URL`,
 `CODEX_ADAPTER_SMOKE_PROVIDER_WIRE_API` and
 `CODEX_ADAPTER_SMOKE_PROVIDER_AUTH=1`; do not put credentials in the
-repository or evidence. Adapter invocations ignore the user's global Codex
-config so unrequested MCP servers are not inherited. The Adapter always
+repository or evidence. This explicit configuration is required when the
+registered model uses a custom Provider: Adapter invocations intentionally
+ignore the user's global Codex config so unrequested MCP servers are not
+inherited. Exploration may succeed by inheriting that config while the
+isolated smoke returns 401 if the route is omitted. The Adapter always
 requests `--output-last-message`; exit code 0 with no durable or structured
 final message is reported as `delivery_missing`.
 
@@ -103,7 +106,7 @@ thread resume. Its real lifecycle smoke is opt-in:
 ```powershell
 $env:CODEX_ADAPTER_REAL_LIFECYCLE_SMOKE='1'
 $env:CODEX_ADAPTER_SMOKE_WORKSPACE='E:\projects\agent-workflow-toolkit'
-$env:CODEX_ADAPTER_SMOKE_MODEL='gpt-5.6-luna'
+$env:CODEX_ADAPTER_SMOKE_MODEL='gpt-5.6-sol'
 go test -run '^TestRealCodexAdapterLifecycleSmoke$' -v ./internal/adapters/codexcli
 ```
 
@@ -118,8 +121,8 @@ Provider calls remain opt-in and must not be placed in the replay fixtures.
 
 The current four-path real smoke index is
 [`W4-smoke-matrix.md`](evidence/2026-08-10/W4-smoke-matrix.md). It separates
-current real results, historical Native evidence and Provider authorization
-blockers; it is not an `experimental` acceptance record.
+current real results from historical Native evidence and remains independent
+from the later `experimental` acceptance record.
 
 The initial parser/artifact benchmark is recorded in
 [`W4-benchmark-baseline.md`](evidence/2026-08-10/W4-benchmark-baseline.md).

@@ -2,8 +2,8 @@
 
 - Date: 2026-08-10
 - Scope: four execution paths for the current Wave 4 evidence index
-- Status: partial; Codex CLI is blocked by current Provider authorization and
-  `experimental` acceptance remains open
+- Status: four-path smoke matrix is complete for the current evidence boundary;
+  Wave 4 hardening and `experimental` acceptance remain open
 - Evidence rule: fixture replay and historical W3 records are retained as
   supporting evidence; only the current real invocations below are marked
   current. No credentials, headers, raw stderr or private prompts are stored.
@@ -15,7 +15,7 @@
 | Codex App Native | [`W2-native-app-smoke-record.md`](../2026-08-09/W2-native-app-smoke-record.md) | Core-issued `launch → observe`, identity/workspace/task-canary verified, artifact validated, human `approve` recorded | PASS (historical W2 evidence) |
 | Cursor Agent | `TestRealCursorAdapterSmoke` on 2026-08-10 | `completed`, `terminal_and_final_delivery`, `result.result`, session present, terminal true, exit code 0, final bytes 16 | PASS (current) |
 | Claude Code | `TestRealClaudeAdapterSmoke` on 2026-08-10 | version `2.1.218`, launch session present, `completed`, `terminal_and_final_delivery`, `result.result`, terminal true, exit code 0, final bytes 16, transcript true | PASS (current) |
-| Codex CLI | `TestRealCodexAdapterLifecycleSmoke` on 2026-08-10 | version `0.144.1`, launch thread present, terminal `failed`, reason `process_exit`, exit code 1, no final delivery | BLOCKED (Provider authorization) |
+| Codex CLI | `TestRealCodexDeliverySmoke` + `TestRealCodexAdapterLifecycleSmoke` on 2026-08-10 | version `0.144.1`, launch thread present, terminal `completed`, reason `terminal_and_final_delivery`, source `durable_last_message`, exit code 0, final bytes 16, transcript true | PASS (current; explicit custom Provider route) |
 
 ## Current real invocations
 
@@ -36,15 +36,24 @@ delivery evidence were present; cleanup completed through the test harness.
 
 ### Codex CLI
 
-The real lifecycle smoke reached `preflight`, `launch` and a provider thread
-identity. The provider then returned a redacted `401 Unauthorized` response;
-the adapter classified the terminal result as `failed/process_exit` with no
-final delivery. This is a current environment authorization blocker, not a
-successful smoke, and must not be hidden by the historical W3 record.
+The real delivery and lifecycle smokes passed with the non-secret custom
+Provider route configuration supplied explicitly to the isolated Adapter:
 
-The retry action is to refresh the authorized local Codex provider/profile
-outside the repository and rerun `TestRealCodexAdapterLifecycleSmoke`; do not
-put credentials or route secrets in source, evidence or test output.
+- `TestRealCodexDeliverySmoke`: `completed`, `durable_last_message`, exit code
+  0, final bytes 16.
+- `TestRealCodexAdapterLifecycleSmoke`: version `0.144.1`, launch thread
+  present, `completed`, `terminal_and_final_delivery`, exit code 0, final bytes
+  16, durable last message and transcript present.
+
+The earlier 401 was caused by an invocation-boundary mismatch: exploration
+used the user's `model_provider=custom` configuration, while the Adapter
+intentionally adds `--ignore-user-config`. The original smoke passed no
+Provider configuration, so Codex used its default OpenAI route and rejected
+the available authorization. `codex login status` only proves local login
+material exists; it does not prove that material is valid for the selected
+endpoint. The successful rerun supplied provider name, base route, wire API
+and auth requirement as non-secret environment values; credentials remain
+outside the repository and evidence.
 
 The smoke failure was rerun after hardening the opt-in test diagnostics; the
 reported output contains only status/reason/source/identity/terminal/size
@@ -52,8 +61,8 @@ fields and does not dump Provider `stdout` or `stderr`.
 
 ## Acceptance boundary
 
-This matrix is not yet a four-path complete smoke pass. The Native path has
-approved W2 evidence, Cursor and Claude have current real passes, and Codex
-requires a fresh authorized run. After Codex passes, the matrix still needs
-the Wave 4 Windows stability, policy/contamination, recovery and benchmark
-evidence before any human `experimental` decision.
+This matrix now has current real passes for Cursor, Claude and Codex CLI; the
+Native path remains approved historical W2 evidence. It is not the complete
+Wave 4 acceptance record: Windows stability, policy/contamination, recovery,
+benchmark, race-enabled verification and human `experimental` confirmation
+remain separate exit conditions.
