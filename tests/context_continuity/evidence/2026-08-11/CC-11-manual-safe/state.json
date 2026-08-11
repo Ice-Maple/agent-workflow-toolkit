@@ -1,0 +1,10 @@
+{
+  "before": {
+    "status": "safe"
+  },
+  "after": {
+    "status": "safe",
+    "recovery_required": false,
+    "last_compact_result": "recovered_safe"
+  }
+}

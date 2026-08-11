@@ -3,7 +3,7 @@
 > 2026-08-08 更正：Wave 1/2 的 `Stop` continuation 仅保留为历史/严格实验路径。真实 App 验证发现用户级 `Stop` 会在每个正常轮次触发，并把 `decision: "block"` 的 reason 显示为用户提示。Wave 3 默认 Fixture 和全局安装器因此改为非阻塞设计：不安装 `Stop`，不覆盖全局 `compact_prompt`，只在真实写入后的压缩或异常恢复中要求核对。安装范围不能替代行为正确性。
 
 - 日期：2026-08-07
-- 状态：执行中（Wave 0 探针、Wave 1 连续性 MVP、Wave 2 非阻止恢复骨架与 Wave 3 机械硬化已实现；宿主 App smoke 待执行）
+- 状态：Wave 3 已对当前支持的 Windows ChatGPT/Codex App 宿主关闭；Wave 4 可启动
 - 设计基线：`docs/brainstorms/2026-08-07-codex-context-continuity.md`
 - 评审处理：`docs/reviews/2026-08-07-codex-context-continuity-review-closure.md`
 
@@ -60,7 +60,7 @@ Wave 1 和 Wave 2 应保持相邻；如果 Wave 1 结束后发现 mid-turn 压�
 - 证据记录当前 App 的 `PreCompact`、`PostCompact`、`SessionStart(source=compact)`、`Stop` 顺序。
 - 明确 manual/auto 两类事件的实际字段。
 - 明确 `continue:false` 是否造成 `TurnAborted`，并将差异同步回设计文档。
-- 证据保存到 `tests/context-continuity/evidence/<date>/W0-*`。
+- 证据保存到 `tests/context_continuity/evidence/<date>/W0-*`。
 
 ## Wave 1：Turn 边界连续性 MVP
 
@@ -108,10 +108,10 @@ Wave 1 没有 `PreToolUse` dirty tracking，也没有 `PreCompact` emergency man
 
 - 一个跨两个 turn 的任务在手动 compact 后能从首个未完成步骤继续。
 - 下一条 prompt 触发的 auto compact 能读取上一次安全 checkpoint。
-- Stop continuation 最多一次，不出现无限循环。
+- 历史严格 Fixture 的 Stop continuation 最多一次，不出现无限循环；当前 Wave 3 默认路径不注册 `Stop`。
 - 不重复已完成的研究、编辑或测试。
 - checkpoint 文件保持精简，状态文件不进入业务仓库。
-- 证据保存到 `tests/context-continuity/evidence/<date>/W1-*`。
+- 证据保存到 `tests/context_continuity/evidence/<date>/W1-*`。
 
 ## Wave 2：最小中途保护与降级恢复
 
@@ -149,10 +149,10 @@ Wave 1 没有 `PreToolUse` dirty tracking，也没有 `PreCompact` emergency man
 
 - dirty + auto compact 会写 manifest、放行压缩并进入恢复核对。
 - dirty + manual compact 同样放行，但向用户显示警告。
-- dirty + 近阈值 + Stop continuation 不因 Hook 阻止而中止。
+- 默认 no-`Stop` 路径中，dirty + 近阈值的 auto compact 会被放行并进入恢复；历史严格 Fixture 的 Stop continuation 回归同样不得阻止 compact。
 - 压缩后模型先核对工作区、artifact 和 transcript 指针，再继续首个未完成步骤。
 - 任何失败路径都不产生无限循环或静默丢失。
-- 证据覆盖 CC-02、CC-03、CC-04、CC-05，并保存到 `tests/context-continuity/evidence/<date>/W2-*`。
+- 证据覆盖 CC-02、CC-03、CC-04、CC-05，并保存到 `tests/context_continuity/evidence/<date>/W2-*`。
 
 ### Wave 1/2 合并判断
 
@@ -185,7 +185,11 @@ Wave 1 没有 `PreToolUse` dirty tracking，也没有 `PreCompact` emergency man
 - CC-09 覆盖 Bash、apply_patch、MCP、只读工具和 Subagent。
 - unknown tool 不会产生假 safe。
 - hot 注入不因恢复 capsule 过大而加速再次压缩。
-- 证据保存到 `tests/context-continuity/evidence/<date>/W3-*`。
+- 当前默认配置不注册 `Stop`；clean 和 dirty 普通 turn 均不产生 checkpoint continuation，且分别保持 clean/dirty，不制造假 safe。
+- 当前支持的 Codex App 宿主至少各完成一次 clean compact、dirty auto compact，以及 safe/dirty manual compact；dirty 路径按 `PreCompact -> PostCompact -> SessionStart(compact) -> Seal` 收口。
+- 真实 App 观察覆盖 `PreToolUse`、`SubagentStart`、`SubagentStop`，并记录 Hook 错误是否改变 turn 结果。
+- 同一已完成 Subagent 的 follow-up completion 在没有新 `SubagentStart` 时仍可归属，exact replay 幂等；陌生或失联 lifecycle 继续 fail-dirty，不产生假 safe。
+- 证据保存到 `tests/context_continuity/evidence/<date>/W3-*`。
 
 ## Wave 4：评测扩展与可选精确调度
 
@@ -233,6 +237,6 @@ W0 探针
 
 ## 当前决策点
 
-Wave 0 → Wave 1 → Wave 2 已构成可初步使用的连续性路径，Wave 3 的机械硬化也已在脚本级实现并通过本地回归与 CLI smoke。当前仍不把 Wave 3 说成真实 Codex App 宿主已验证：需要在隔离配置中观察真实的 `PreToolUse`、`Subagent*`、`PreCompact`、`PostCompact` 和 `SessionStart(source=compact)` 顺序。
+Wave 0 → Wave 1 → Wave 2 已构成可使用的连续性路径。Wave 3 的机械硬化已通过 70 项回归、编译与证据一致性检查；当前 Windows ChatGPT/Codex App `26.803.5235.0` Store x64 已真实覆盖 `PreToolUse`、`Subagent*`、dirty auto、clean/safe/dirty manual compact、普通 turn 无 continuation，以及 session-local lock fault injection 下的 fail-open。独立 reviewer 最终 PASS，无 P0/P1/P2 finding。
 
-Wave 4（统计评测和可选精确调度）继续延期，只有真实使用数据表明中途压缩仍频繁造成重复执行时再启动。
+用户已确认当前 Windows ChatGPT/Codex App 为本 Wave 的支持宿主；其行为 gate、版本化证据一致性检查和独立复核均已通过，Wave 3 正式关闭。其他机器或宿主版本进入后续兼容性矩阵。Wave 4（统计评测和可选精确调度）可以启动，但精确调度扩展仍只有在真实指标证明现有恢复控制不足时才进入范围。

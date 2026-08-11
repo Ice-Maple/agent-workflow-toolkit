@@ -1,0 +1,9 @@
+{
+  "implementation": "post-fix",
+  "status": "dirty",
+  "active_subagent_count": 0,
+  "last_subagent_status": "completed",
+  "known_followup_completion": "attributed through bounded completion fingerprint ledger",
+  "false_unknown_count": 0,
+  "seal_blocked_by_false_unknown": false
+}

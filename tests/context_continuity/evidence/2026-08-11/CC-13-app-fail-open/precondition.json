@@ -1,0 +1,20 @@
+{
+  "case_id": "CC-13-app-fail-open",
+  "captured_at": "2026-08-11T14:34:12+08:00",
+  "host": {
+    "application": "Windows ChatGPT/Codex App",
+    "version": "26.803.5235.0",
+    "package_signature": "Store",
+    "architecture": "x64"
+  },
+  "repository_head": "130a901061908834ecf2c1a401d58aa822bf4333",
+  "session_pseudonym": "5413c0de69096a99",
+  "hook_path": "already-loaded user-level PreToolUse",
+  "fault_injection": "exclusive lock on the session state lock file via a hidden helper using FileShare.None",
+  "lock_validation": "an independent open failed while the helper held the lock",
+  "helper_timeout_seconds": 120,
+  "sha256": {
+    "user_hooks_json": "8dcdff5fa1712a4de94fb368e29a50c9c9e06075121c9e1d52f11e6787131575"
+  },
+  "privacy": "Raw task/session ids, paths, transcript pointers, prompts, tool arguments and private logs are omitted. The session value is a one-way pseudonym; retained probe values are synthetic test data."
+}

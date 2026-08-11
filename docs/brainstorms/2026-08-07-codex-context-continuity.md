@@ -1,7 +1,7 @@
 # Codex 上下文连续性与安全压缩
 
 - 日期：2026-08-07
-- 状态：草案（阻塞于宿主行为 smoke 验证）
+- 状态：已实施，Wave 3 已对当前支持的 Windows ChatGPT/Codex App 宿主关闭
 - 评审：`docs/reviews/2026-08-07-codex-context-continuity-review.md`
 
 ## 背景与目标
@@ -21,7 +21,7 @@ Codex App 的自动上下文压缩可能发生在一个 turn 的中途。压缩�
 - Hook 可取得 session、workspace、turn 和 transcript 路径等机械信息。
 - Hooks 不提供精确 token usage，也不能直接触发当前 App 线程的 compact；这些能力由 App Server 提供。
 
-### 源码证据与阻塞验证
+### 宿主证据与兼容性边界
 
 Grok 评审引用当前 Codex 本地与 remote compact 路径指出：`PreCompact` 返回 `continue: false` 会使 compact 返回 `TurnAborted`，中止当前 turn；压缩没有完成，因此不会触发压缩后的 `SessionStart(source=compact)`。
 
@@ -29,7 +29,7 @@ Grok 评审引用当前 Codex 本地与 remote compact 路径指出：`PreCompac
 
 - 不把 `PreCompact continue: false` 用作 dirty 自动压缩的正常保护路径。
 - manual 和 auto 压缩均默认放行；dirty 时先写机械 emergency manifest，再在压缩后恢复。
-- 在针对性真实 Codex App smoke 通过前，不把完整事件顺序视为已确认可实施合同。
+- 当前 Windows ChatGPT/Codex App `26.803.5235.0` Store x64 已观察到 dirty auto、clean/safe/dirty manual compact、普通 turn UI、Subagent follow-up/replay 和真实 `PreToolUse` fail-open；版本化证据、自检和独立复核均已通过，Wave 3 已对该支持宿主关闭。其他机器或宿主版本进入兼容性矩阵。
 
 官方参考：
 
@@ -41,11 +41,11 @@ Grok 评审引用当前 Codex 本地与 remote compact 路径指出：`PreCompac
 
 | 层级 | 第一版承诺 |
 |---|---|
-| Hooks 硬保证 | 对已覆盖工具执行机械状态转换；校验 session/workspace；原子写状态；记录事件；压缩后按预算注入；限制 continuation 次数；不复制完整 transcript；不写凭据。 |
+| Hooks 硬保证 | 对已覆盖工具执行机械状态转换；校验 session/workspace；原子写状态；记录事件；压缩后按预算注入；默认路径不产生 continuation；不复制完整 transcript；不写凭据。 |
 | Skill 尽力而为 | 提炼真正重要的语义；在阶段和 turn 边界维护检查点；识别新任务；选择需要保留的决策、证据和下一步。模型未遵循时只能告警和降级，不能宣称机械保证。 |
 | Codex 宿主 | 判断自动压缩阈值、执行压缩并产生生命周期事件。第一版不控制精确压缩时机。 |
 
-“每个 turn 结束前必须形成安全检查点”是目标，不是无条件硬保证。Stop Hook 最多提供一次补写机会；仍未 seal 时保留 dirty、记录告警并允许后续降级恢复。
+“每个 turn 结束前必须形成安全检查点”是目标，不是无条件硬保证。当前默认 no-`Stop` 路径允许 turn 直接结束，并在状态仍为 dirty 时保留可审计的后续恢复义务；历史严格实验路径的 Stop Hook 最多提供一次补写机会。
 
 ## 核心设计
 
@@ -157,7 +157,7 @@ estimated_tokens = ceil(base × 1.20)
 - Seal 只校验，不做确定性截断或自动删字段；预算失败返回可诊断错误并保持 dirty，由 Skill重写。
 - 如果恢复时不存在合格 hot state，只注入不超过 250 estimated tokens 的机械 emergency capsule和温状态路径，不把超限正文强塞入上下文。
 
-实测 tokenizer 偏差和 hook spilling 行为必须进入 smoke 证据；若估算系统性偏松或偏紧，再版本化修改估算规则。
+Wave 3 以确定性估算器、边界/超限自动化和不 spill 合同收口；真实 tokenizer 偏差、跨模型 `additionalContextLimit` 压力样本和系统性校准进入 Wave 4 评测，不反向阻塞 Wave 3。若当前宿主 smoke 实际出现超限注入或连续再压缩，则作为 Wave 3 缺陷重新打开。
 
 ### 6. 检查点内容契约
 
@@ -239,6 +239,8 @@ Subagent 规则：
 - 根 session 在 SubagentStart 时置 dirty，并记录 agent/task 标识。
 - Subagent 内部工具不直接 seal 根 session。
 - SubagentStop 返回的结论由根 Agent 写入 checkpoint 后，根 session 才可 seal。
+- 当前 App 复用已完成 agent 执行 follow-up 时可能不再发送 `SubagentStart`，只发送新的 `SubagentStop`；实现用最多 64 条 completion fingerprint 归属这种 follow-up，完全相同的重放幂等，不能把合法 follow-up 制造成 orphan `unknown`。
+- 已知历史 stop 的重放不能清除同一 ID 的新 running lifecycle；完全陌生或已被 ledger 淘汰的 stop 仍记为 `unknown` 并阻止 seal。
 - 未完成或失联的 Subagent 必须保留为状态不明，不能因主 turn 结束而标完成。
 
 ### 9. 检查点生成时机
@@ -254,7 +256,12 @@ Subagent 规则：
 
 `PreCompact` 不临时要求模型生成语义摘要，只写机械 manifest并放行。
 
-### 10. Stop 与 Compact 的优先级
+### 10. Stop 与 Compact 的优先级（历史/严格实验路径）
+
+2026-08-08 之后，Wave 3 默认 Fixture 和全局安装器不再注册
+`Stop`。以下行为只用于回归历史严格实验路径，不能作为当前默认路径的
+验收 oracle；当前默认路径应直接结束普通 turn，并在后续真实 compact
+时根据 `clean`/`dirty` 状态进入静默恢复或降级恢复。
 
 `Stop` Hook 的行为：
 
@@ -331,7 +338,7 @@ context_window - max(25% context_window, 2 × 最长常见 turn 增量)
 - **安全**：不保存凭据，不重复复制 transcript，不因恢复覆盖用户已有修改。
 - **可恢复**：压缩后以磁盘证据为准，从首个未完成步骤继续。
 - **可诊断**：记录压缩触发、失败和恢复事件，但不记录大段内容。
-- **无死循环**：Stop continuation 最多一次；PreCompact 正常路径不阻止压缩。
+- **无死循环**：默认路径不产生 Stop continuation；同一 compact 生命周期不得无限重试；历史严格实验路径的 Stop continuation 最多一次。
 - **身份隔离**：session 或 workspace 不匹配时拒绝误恢复。
 - **兼容性**：配置值和 Hook 行为按当前 Codex 版本验证，不把未验证源码行为当作永久合同。
 
@@ -340,7 +347,7 @@ context_window - max(25% context_window, 2 × 最长常见 turn 增量)
 统一证据目录：
 
 ```text
-tests/context-continuity/evidence/<YYYY-MM-DD>/<case-id>/
+tests/context_continuity/evidence/<YYYY-MM-DD>/<case-id>/
 ├── precondition.json
 ├── events.jsonl
 ├── state-before.json
@@ -356,8 +363,8 @@ tests/context-continuity/evidence/<YYYY-MM-DD>/<case-id>/
 |---|---|---|---|---|
 | CC-01 | safe；将阈值调低，在下一 prompt 触发 auto compact | `PreCompact(auto) -> PostCompact -> SessionStart(compact)`；终态 safe | 重跑已完成步骤 | events、state-after、App 观察 |
 | CC-02 | dirty；auto compact | 写 emergency manifest并放行；压缩后 `recovery_required` | `continue:false`、TurnAborted | events、manifest、App 观察 |
-| CC-03 | dirty；Stop 发起一次 seal continuation | 最多续接一次；成功 seal 或告警结束 | 无限 continuation | events 中 continuation 计数 |
-| CC-04 | dirty + 近阈值 + Stop continuation | auto compact 被放行，随后恢复并可 seal | PreCompact 阻止导致无法 seal | events、终态、App 观察 |
+| CC-03 | 默认 no-`Stop` 配置；分别以 clean/dirty 状态结束普通 turn | turn 直接结束且不出现 checkpoint continuation；dirty 状态保留为后续 compact 的恢复义务 | 用户可见 continuation、同一 turn 循环、把 dirty 误标为 safe | events、state-after、App 观察 |
+| CC-04 | dirty + 近阈值；auto compact 在 turn 中途发生 | `PreCompact(auto)` 放行并写有限 emergency manifest；随后 `PostCompact -> SessionStart(compact)`，进入 `recovery_required` 并可重新 seal | PreCompact 阻止、TurnAborted、恢复后无依据重跑已完成工作 | events、manifest、终态、App 观察 |
 | CC-05 | manual compact，分别覆盖 safe/dirty | 两者均放行；dirty 进入恢复核对 | 用户显式 compact 触发 TurnAborted | events、UI 观察 |
 | CC-06 | 构造已完成研究、编辑和测试证据后压缩 | 恢复从首个未完成步骤继续 | 重新研究、覆盖文件、无理由重测 | artifacts、操作日志、恢复回复 |
 | CC-07 | hot/warm 位于预算边界和超限 | 边界内 seal；超限退出 `2` 并保持 dirty；注入不 spill | 静默截断、超限注入 | CLI JSON、state、hook output |
@@ -371,7 +378,7 @@ tests/context-continuity/evidence/<YYYY-MM-DD>/<case-id>/
 - **重复执行率** = 恢复后无正当理由重复已完成动作数 / 恢复总次数。
 - **必须信息召回率** = 恢复后正确保留的 case oracle 必填项数 / oracle 必填项总数。
 - **预算合规率** = 未超过对应 estimated-token 预算的成功注入或 seal 次数 / 成功注入或 seal 总次数。
-- **循环违规数** = Stop continuation 超过一次或同一事件被无限重试的 case 数。
+- **循环违规数** = 默认路径出现任何 Stop continuation、历史严格实验路径 Stop continuation 超过一次，或同一 lifecycle 事件被无限重试的 case 数。
 
 指标数据来自 case oracle、`events.jsonl`、seal JSON 输出、状态快照和 App 观察记录；不能仅凭最终自然语言结论打分。
 
@@ -405,17 +412,17 @@ tests/context-continuity/evidence/<YYYY-MM-DD>/<case-id>/
 - 第一版不承诺识别所有语义上的“新任务”；正常 turn 边界即候选安全压缩边界。
 - 第一版不复制完整 transcript，不构建长期 memory 系统。
 - 第一版不修改 Codex 自身自动压缩实现，只使用公开配置和生命周期扩展点。
-- 本文仍是设计草案，不授权立即修改用户级 Codex 配置或安装 Hooks。
+- 本文是已经实施的设计基线；后续新增或修改用户级 Codex 配置仍需按安装指南预览、确认和保留回滚证据。
 
-## 阻塞验证项
+## 验证状态与后续项
 
-- [ ] 用真实 Codex App 验证 `PreCompact -> PostCompact -> SessionStart(compact)` 成功路径事件顺序。
-- [ ] 用真实 Codex App 复现 `PreCompact continue:false -> TurnAborted`，确认本地和 remote 行为。
-- [ ] 验证 dirty + 近阈值 + Stop continuation 会放行 compact，且不会形成循环。
-- [ ] 验证 Hook 真实 tool names、Subagent 事件和 `additionalContextLimit` spilling。
-- [ ] 根据实际模型和长 turn 数据确定首个 `model_auto_compact_token_limit`。
+- [x] 已在当前 Windows Codex App 观察到 dirty + auto 的 `PreCompact -> PostCompact -> SessionStart(compact)` 成功路径，以及 clean/safe/dirty manual 变体。
+- [x] `PreCompact continue:false -> TurnAborted` 已从当前默认合同移除，只保留为历史严格实验项，不再阻塞 Wave 3 默认路径。
+- [x] 当前默认 no-`Stop` 路径已观察到 clean/dirty 普通 turn 无 continuation，以及 dirty auto compact 放行、恢复并重新 seal。
+- [x] 已观察到真实 tool names、Subagent 事件与 follow-up/replay；session-local lock fault injection 证明 `PreToolUse` 持久化失败不阻止工具或 turn；`additionalContextLimit` 预算边界已有自动化覆盖，跨模型真实压力样本转入 Wave 4 评测。
+- [ ] Wave 4：根据实际模型和长 turn 数据判断是否需要自定义 `model_auto_compact_token_limit`。
 
-以上阻塞项完成并修订不一致后，才能将状态从“草案”推进为“已确认可实施”。
+Wave 3 的版本化证据一致性检查和独立复核均已通过，无 P0/P1/P2 finding，当前支持宿主已关闭。Wave 4 可以从评测样本与指标基线开始；跨模型阈值和长 turn 指标不反向阻塞 Wave 3。
 
 ## 其他开放问题
 
@@ -424,8 +431,6 @@ tests/context-continuity/evidence/<YYYY-MM-DD>/<case-id>/
 
 ## 下一步
 
-1. 先制定验证计划和 smoke harness，不直接实现完整 Skill。
-2. 实现最小状态记录器、seal CLI、预算估算和 Hooks 探针。
-3. 在隔离的 Codex 配置下执行 CC-01 至 CC-09，并保存完整证据。
-4. 根据宿主行为修订合同并再次评审。
-5. 设计状态确认后，再制定完整实施计划和用户级安装方案。
+1. 以已关闭的 Wave 3 当前支持宿主证据为基线，启动 Wave 4 的评测样本和指标设计。
+2. 将其他机器和宿主版本纳入兼容性矩阵，不把单机关闭结论直接外推。
+3. 只有 Wave 4 指标证明必要时才实现 App Server 精确调度扩展。

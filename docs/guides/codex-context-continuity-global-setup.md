@@ -6,20 +6,21 @@
 
 Wave 3 的全局默认配置是非阻塞的：它观察工具、压缩和子 Agent 生命周期，但不注册 `Stop` Hook，不会在正常回复结束时插入 checkpoint continuation。真实 Codex App 的事件顺序仍应在目标环境验证，因此推荐按“预览 → 备份后全局应用 → 重启并观察 → 必要时还原”的顺序操作。
 
-如果环境中仍出现 `Write a concise checkpoint.md ...` 或 `<hook_prompt ...>`，说明还加载着旧版阻塞式 `Stop` 配置。先在 Codex 设置或 `/hooks` 中关闭该 Hook，再按本指南升级；仅把旧 Hook 从全局改成项目级不能解决问题。
+如果环境中仍出现 `Write a concise checkpoint.md ...` 或 `<hook_prompt ...>`，说明还加载着旧版阻塞式 `Stop` 配置。ChatGPT/Codex App 使用 `Settings -> Hooks`，Codex CLI 才使用 `/hooks`；先在对应入口关闭该 Hook，再按本指南升级。仅把旧 Hook 从全局改成项目级不能解决问题。
 
 本指南提供的安装器只修改指定的 Codex 用户目录，不修改业务仓库，不复制认证文件，不改变权限或审批策略。
 
-## 当前实施状态（2026-08-09）
+## 当前实施状态（2026-08-11）
 
 当前机器已经完成用户级全局应用，配置文件为 `%USERPROFILE%\.codex\hooks.json`，其命令直接指向 `E:\projects\agent-workflow-toolkit\tools\context_continuity` 下的脚本。当前版本的交付边界是：
 
 - 已完成：Wave 0–3 连续性脚本、非阻塞全局 Hook、Windows 并发/文件占用修复、缺失 `session_id` 静默处理，以及只读 PowerShell 误标 `dirty` 修复。
-- 已验证：66 项本地测试通过；本机全局 Hook 冒烟通过；真实 App 已观察到自动压缩后的恢复入口。
-- 仍待验证：其他机器、其他宿主版本和长时间多会话运行下的事件顺序与稳定性。
+- 已验证：70 项本地测试通过；本机全局 Hook 冒烟通过；当前 Windows App 已覆盖 dirty auto、clean/safe/dirty manual compact、clean/dirty 普通 turn 无 continuation、真实工具/Subagent 事件和 session-local lock fault injection 下的 fail-open。
+- 已关闭：版本化证据与独立复核均已通过，Wave 3 已对当前支持的 Windows ChatGPT/Codex App `26.803.5235.0` Store x64 宿主关闭。
+- 后续兼容性待办：其他机器、其他宿主版本和长时间多会话运行下的事件顺序与稳定性。
 - 尚未实现：精确控制自动压缩只在 turn 边界发生的调度器。当前 Hook 不改变 Codex 原生自动压缩时机，只在中途压缩时提供恢复线索。
 
-后续若继续推进，应把 Wave 4 的 token 使用量监控与安全边界调度作为独立能力开发，不应把它误认为当前 Wave 3 全局安装的一部分。
+Wave 4 现在可以从 token 使用量、恢复质量和重复执行率评测开始。安全边界调度仍是条件触发的独立能力，不应把它误认为当前 Wave 3 全局安装的一部分。
 
 ## 1. 会安装什么
 
@@ -186,15 +187,20 @@ macOS/Linux 将 `py -3` 换成 `python3`。然后做一个很小的真实任务�
 5. dirty 状态发生 compact 后，是否进入一次 `recovery_required` 核对，而不是在每轮结束时循环；
 6. 状态目录是否只包含有限元数据，没有 prompt、完整 transcript、密码或 Token。
 
-首次使用时如果宿主要求信任 Hook，应只信任已经检查过的本仓库路径。不要用绕过 Hook 信任或绕过审批的危险选项来“验证成功”。
+首次使用时如果宿主要求信任 Hook，应只信任已经检查过的本仓库路径。App 在
+`Settings -> Hooks` 中区分用户级与 `From Projects` 来源，并可能分别要求目录信任、
+具体 Hook 信任和 `Reload hooks`；App 对话中的 `/hooks` 不会打开审核器。Codex CLI
+才在交互会话中使用 `/hooks`。不要用绕过 Hook 信任或绕过审批的危险选项来“验证成功”。
 
-本仓库已有修正版脚本级证据，但它不替代目标 App 宿主验证：[`W3-nonblocking-global-smoke.md`](../../tests/context_continuity/evidence/2026-08-08/W3-nonblocking-global-smoke.md)。
+本机当前支持宿主的关闭证据见 [`W3-app-host-smoke.md`](../../tests/context_continuity/evidence/2026-08-11/W3-app-host-smoke.md)，脚本级证据见 [`W3-nonblocking-global-smoke.md`](../../tests/context_continuity/evidence/2026-08-08/W3-nonblocking-global-smoke.md)。这些证据不替代其他目标 App 版本或机器的宿主验证。
 
 ## 6. 安全还原
 
 ### 6.0 紧急停用
 
-如果出现循环停止或可见 Hook 提示，先在 Codex 设置或 `/hooks` 中关闭本功能的 Hook，并重启 App。这一步只止血，不改变磁盘配置。随后选择下面之一：
+如果出现循环停止或可见 Hook 提示，App 通过 `Settings -> Hooks`、Codex CLI 通过
+`/hooks` 关闭本功能的 Hook，并重启对应宿主。这一步只止血，不改变磁盘配置。
+随后选择下面之一：
 
 - 用安装器重新 `apply`：升级到当前非阻塞 Hook，并自动备份旧文件；若确认旧压缩覆盖来自本功能，再加 `--remove-legacy-compact-overrides`；
 - 用已有 `BACKUP_DIR` 执行 `restore`：恢复到安装前状态。
@@ -309,8 +315,8 @@ compact_prompt = "Preserve user corrections, hard constraints, unfinished steps,
 
 | 现象 | 处理 |
 | --- | --- |
-| 仍出现 `Write a concise checkpoint.md` | 仍加载着旧版 `Stop`。先关闭 Hook，重新运行当前安装器并重启，再检查 `/hooks` 中的来源。 |
-| Hook 没有输出 | 重启 App，检查目标 `hooks.json`、Python 路径和 Hook 信任；先用 `--dry-run`。 |
+| 仍出现 `Write a concise checkpoint.md` | 仍加载着旧版 `Stop`。先关闭 Hook，重新运行当前安装器并重启；App 在 `Settings -> Hooks` 检查来源，CLI 才使用 `/hooks`。 |
+| Hook 没有输出 | 重启 App，检查目标 `hooks.json`、Python 路径和 Hook 信任；项目 Hook 还要在 `Settings -> Hooks -> From Projects` 完成目录/Hook 信任并 `Reload hooks`；先用 `--dry-run`。 |
 | `codex --strict-config` 失败 | 检查现有 `config.toml`；当前安装器不会新增压缩字段。 |
 | `restore` 拒绝覆盖 | 目标文件在安装后发生了变化。先保存或检查新改动，再决定是否 `--force`。 |
 | `WinError 5` 指向 `.state.json.*.tmp -> state.json` | 临时文件已创建且重试后恢复时，通常是 Windows 瞬时文件占用，不是扩大权限的理由。更新到包含 session 事务锁和原子替换重试的版本；若持续失败，还需检查目录 ACL，以及杀毒、索引或同步软件是否长期占用状态目录。 |

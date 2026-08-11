@@ -1,0 +1,20 @@
+{
+  "before_lock": {
+    "state_sha256": "cd09142a12e3e22acefca473e5147bbf1838dcb0cb86d772046662476001a7d0",
+    "events_sha256": "4dbcabb62745cd9a367ace7828dfeac5d88faf74bf47f8848429ca704dd81453",
+    "events_bytes": 4475
+  },
+  "while_locked_after_turn": {
+    "state_sha256": "cd09142a12e3e22acefca473e5147bbf1838dcb0cb86d772046662476001a7d0",
+    "events_sha256": "4dbcabb62745cd9a367ace7828dfeac5d88faf74bf47f8848429ca704dd81453",
+    "events_bytes": 4475,
+    "unchanged": true
+  },
+  "after_unlock_control": {
+    "state_sha256": "a2272d92ff4318154215586b1c9df59247a7ddb1ed6f51797c889555270935ea",
+    "events_sha256": "a20d731e091aa49ebb49dbb2be979ad9e0a0353e3cfe70cc4f0b93f27407ab51",
+    "events_bytes": 4715,
+    "event_appended": true
+  },
+  "user_hooks_json_sha256_after": "8dcdff5fa1712a4de94fb368e29a50c9c9e06075121c9e1d52f11e6787131575"
+}

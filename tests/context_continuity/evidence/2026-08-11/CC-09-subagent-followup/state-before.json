@@ -1,0 +1,7 @@
+{
+  "implementation": "pre-fix",
+  "known_completed_followup_without_start": "treated_as_orphan",
+  "observed_terminal_active_subagent_count": 2,
+  "observed_false_unknown_count": 1,
+  "seal_result": "rejected until explicit evidence reconciliation"
+}

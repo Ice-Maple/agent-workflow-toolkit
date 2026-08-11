@@ -38,10 +38,12 @@ the prompt text or transcript path.
 2. Replace `<REPO_ROOT>` with this repository's absolute path and
    `<PROBE_LOG_DIR>` with a user-private temporary evidence directory.
 3. Do not overwrite `~/.codex/hooks.json` or the active user `config.toml`.
-4. Start Codex with the isolated layer, review/trust the exact hook definitions,
-   and run the smallest manual compact and low-threshold auto-compact cases.
+4. Start Codex with the isolated layer and review/trust the exact hook
+   definitions. In the App use `Settings -> Hooks -> From Projects`, complete
+   project and hook trust, then `Reload hooks`; `/hooks` is a Codex CLI
+   interactive command, not an App chat command.
 5. Save the resulting `events.jsonl`, UI observations, and the active config
-   summary under `tests/context-continuity/evidence/<date>/W0-*`.
+   summary under `tests/context_continuity/evidence/<date>/W0-*`.
 
 The probe intentionally has no `continue:false` output. It cannot change the
 compact result and therefore cannot create the `TurnAborted` failure being
@@ -61,8 +63,8 @@ that process environment, for example:
 $env:CODEX_CONTEXT_CONTINUITY_HOME = Join-Path ([IO.Path]::GetTempPath()) "codex-context-continuity-wave1"
 ```
 
-Then replace `<REPO_ROOT>` in the fixture, review/trust the exact hooks, and
-run a two-turn task. At the first turn's stop, the Hook should request one
+Then replace `<REPO_ROOT>` in the fixture, review/trust the exact hooks through
+the host-specific UI described above, and run a two-turn task. At the first turn's stop, the Hook should request one
 checkpoint seal. After writing the concise `checkpoint.md` at the injected
 path and running the injected seal command, the same turn may end. A later
 `SessionStart(source=compact)` should inject that checkpoint.
@@ -114,8 +116,17 @@ The Wave 3 hook output is fail-open: these hooks record state but do not return
 unsupported `continue:false` or blocking decisions for normal turns, tool
 calls, and subagent lifecycle events. Tool arguments and subagent messages are persisted
 as hashes/lengths only. Use a private `CODEX_CONTEXT_CONTINUITY_HOME`, replace
-`<REPO_ROOT>` in the fixture, review/trust the exact hooks, and save W3 evidence
-under `tests/context_continuity/evidence/<date>/W3-*`.
+`<REPO_ROOT>` in the fixture, review/trust the exact hooks through the App
+Settings or CLI UI, and save W3 evidence under
+`tests/context_continuity/evidence/<date>/W3-*`.
+
+For an App fail-open host smoke, a project hook is not required when the
+user-level Wave 3 `PreToolUse` hook is already loaded. A session-local lock
+fault injection may hold only the isolated task's `.state.lock`, run one
+read-only dynamic probe, release the lock, and then run an unlocked control.
+The evidence must show normal recording before and after the fault, unchanged
+state/events during the locked call, successful tool output, a completed/idle
+turn, and an unchanged user hook hash.
 
 ## Evidence requirements
 
@@ -123,7 +134,18 @@ At minimum capture:
 
 - `SessionStart` sources: `startup`, `resume`, and `compact` when available;
 - `PreCompact` and `PostCompact` trigger values: `manual` and `auto`;
-- absence of `Stop` from the Wave 3 default fixture and normal turn completion
-  without a visible continuation prompt;
+- absence of `Stop` from the Wave 3 default fixture; clean and dirty normal
+  turns both complete without a visible continuation prompt, while clean stays
+  clean and dirty is not misreported as safe;
 - whether compact completion is followed by `SessionStart(source=compact)`;
-- whether a hook error or probe output changes the turn outcome.
+- whether a hook error or probe output changes the turn outcome;
+- a clean compact that stays silent and a dirty auto compact that reaches
+  `recovery_required` and can be sealed again;
+- whether a completed agent reused by `followup_task` remains attributable when
+  the host emits another `SubagentStop` without a new `SubagentStart`; exact
+  callback replays must be idempotent, while foreign/orphan stops stay unknown.
+
+The legacy `Stop` continuation cases remain regression tests for the historical
+strict fixture. They are not Wave 3 default-path acceptance oracles. For the
+default no-`Stop` path, CC-03 means that a normal turn ends without a visible
+continuation, while CC-04 covers dirty mid-turn auto compact and recovery.

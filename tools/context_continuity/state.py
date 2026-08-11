@@ -27,6 +27,7 @@ MAX_HOT_ESTIMATED_TOKENS = 600
 MAX_WARM_ESTIMATED_TOKENS = 1500
 MAX_EMERGENCY_ESTIMATED_TOKENS = 250
 MAX_ACTIVE_SUBAGENTS = 16
+MAX_RECENT_COMPLETED_SUBAGENTS = 64
 MAX_TOOL_NAME_CHARS = 256
 SESSION_LOCK_TIMEOUT_SECONDS = 2.0
 ATOMIC_REPLACE_ATTEMPTS = 6
@@ -498,6 +499,26 @@ def validate_state(state: Any) -> str | None:
             return "invalid active_subagent status"
         if not isinstance(item.get("agent_type", "unknown"), str) or len(item.get("agent_type", "unknown")) > 160:
             return "invalid active_subagent agent_type"
+    recent_completed = state.get("recent_completed_subagents", [])
+    if not isinstance(recent_completed, list) or len(recent_completed) > MAX_RECENT_COMPLETED_SUBAGENTS:
+        return "invalid recent_completed_subagents"
+    completed_fingerprints: set[tuple[str, str, str | None]] = set()
+    for item in recent_completed:
+        if not isinstance(item, dict):
+            return "invalid recent_completed_subagent entry"
+        agent_id_hash = item.get("agent_id_hash")
+        if not _valid_digest(agent_id_hash, allow_none=False):
+            return "invalid recent_completed_subagent agent_id_hash"
+        turn_hash = item.get("turn_hash")
+        if not _valid_digest(turn_hash, allow_none=False):
+            return "invalid recent_completed_subagent turn_hash"
+        message_hash = item.get("message_hash")
+        if not _valid_digest(message_hash):
+            return "invalid recent_completed_subagent message_hash"
+        fingerprint = (agent_id_hash, turn_hash, message_hash)
+        if fingerprint in completed_fingerprints:
+            return "duplicate recent_completed_subagent fingerprint"
+        completed_fingerprints.add(fingerprint)
     if state.get("last_subagent_status") not in (None, "running", "completed", "unknown"):
         return "invalid last_subagent_status"
     emergency_chars = state.get("emergency_manifest_chars", 0)
@@ -633,6 +654,7 @@ def _normalize_wave3_state(state: dict[str, Any]) -> bool:
         "hot_estimated_tokens": 0,
         "warm_estimated_tokens": 0,
         "active_subagents": [],
+        "recent_completed_subagents": [],
         "last_subagent_id_hash": None,
         "last_subagent_type": None,
         "last_subagent_status": None,
@@ -729,6 +751,7 @@ def ensure_session(
             "last_compact_completed_at": None,
             "last_compact_result": None,
             "active_subagents": [],
+            "recent_completed_subagents": [],
             "last_subagent_id_hash": None,
             "last_subagent_type": None,
             "last_subagent_status": None,
@@ -936,6 +959,59 @@ def _active_subagent_index(state: dict[str, Any], agent_hash: str) -> int | None
     return None
 
 
+def _recent_completed_subagent_index(state: dict[str, Any], agent_hash: str) -> int | None:
+    for index, item in enumerate(state.get("recent_completed_subagents", [])):
+        if isinstance(item, dict) and item.get("agent_id_hash") == agent_hash:
+            return index
+    return None
+
+
+def _completed_subagent_fingerprint_index(
+    state: dict[str, Any],
+    *,
+    agent_hash: str,
+    turn_hash: str,
+    message_hash: str | None,
+) -> int | None:
+    for index, item in enumerate(state.get("recent_completed_subagents", [])):
+        if (
+            isinstance(item, dict)
+            and item.get("agent_id_hash") == agent_hash
+            and item.get("turn_hash") == turn_hash
+            and item.get("message_hash") == message_hash
+        ):
+            return index
+    return None
+
+
+def _remember_subagent_completion(
+    state: dict[str, Any],
+    *,
+    agent_hash: str,
+    turn_hash: str,
+    message_hash: str | None,
+) -> None:
+    """Keep bounded tombstones so host follow-up stops remain attributable."""
+
+    recent = state.setdefault("recent_completed_subagents", [])
+    existing_index = _completed_subagent_fingerprint_index(
+        state,
+        agent_hash=agent_hash,
+        turn_hash=turn_hash,
+        message_hash=message_hash,
+    )
+    if existing_index is not None:
+        recent.pop(existing_index)
+    recent.append(
+        {
+            "agent_id_hash": agent_hash,
+            "turn_hash": turn_hash,
+            "message_hash": message_hash,
+        }
+    )
+    del recent[:-MAX_RECENT_COMPLETED_SUBAGENTS]
+
+
 def _record_subagent_event(
     session_dir: Path,
     *,
@@ -945,6 +1021,7 @@ def _record_subagent_event(
     agent_id: str | None,
     agent_type: str,
     message: str | None = None,
+    idempotent: bool = False,
 ) -> str | None:
     return append_event(
         session_dir,
@@ -958,6 +1035,8 @@ def _record_subagent_event(
             "agent_message_hash": digest(message),
             "agent_message_chars": len(message) if isinstance(message, str) else 0,
             "active_subagent_count": len(state.get("active_subagents", [])),
+            "lifecycle_status": state.get("last_subagent_status"),
+            "idempotent": idempotent,
         },
     )
 
@@ -1053,14 +1132,56 @@ def mark_subagent_stopped(
     agent_hash = digest(agent_id)
     if agent_hash is None:
         return session_dir, state, "missing agent_id"
+    turn_hash = digest(turn_id)
+    if turn_hash is None:
+        return session_dir, state, "missing turn_id"
+    message_hash = digest(last_assistant_message)
     index = _active_subagent_index(state, agent_hash)
-    if index is not None and state["active_subagents"][index].get("status") == "running":
+    completed_index = _recent_completed_subagent_index(state, agent_hash)
+    completed_fingerprint_index = _completed_subagent_fingerprint_index(
+        state,
+        agent_hash=agent_hash,
+        turn_hash=turn_hash,
+        message_hash=message_hash,
+    )
+    matches_previous_completion = completed_fingerprint_index is not None
+    idempotent = False
+    if (
+        index is not None
+        and state["active_subagents"][index].get("status") == "running"
+        and matches_previous_completion
+    ):
+        # An exact replay from the prior completion can arrive after the same
+        # agent id has started a newer lifecycle. It must not finish that newer
+        # running entry or allow the root to seal prematurely.
+        stop_status = "completed"
+        idempotent = True
+    elif index is not None and state["active_subagents"][index].get("status") == "running":
         state["active_subagents"].pop(index)
         stop_status = "completed"
+        _remember_subagent_completion(
+            state,
+            agent_hash=agent_hash,
+            turn_hash=turn_hash,
+            message_hash=message_hash,
+        )
     elif index is not None:
         # Repeated orphan stops remain unknown until a matching start/stop
         # sequence explicitly re-establishes the child lifecycle.
         stop_status = "unknown"
+    elif completed_index is not None:
+        # Codex App reuses an already-completed agent thread for follow-up work
+        # without emitting another SubagentStart. A known completion therefore
+        # remains attributable instead of becoming a permanent orphan warning.
+        stop_status = "completed"
+        idempotent = matches_previous_completion
+        if not idempotent:
+            _remember_subagent_completion(
+                state,
+                agent_hash=agent_hash,
+                turn_hash=turn_hash,
+                message_hash=message_hash,
+            )
     else:
         # An orphan/foreign stop is evidence of an unknown lifecycle; do not
         # turn it into a false safe state. Keep a bounded unknown entry so a
@@ -1073,19 +1194,32 @@ def mark_subagent_stopped(
                 "agent_id_hash": agent_hash,
                 "agent_type": _safe_agent_type(agent_type),
                 "status": "unknown",
-                "turn_hash": digest(turn_id),
+                "turn_hash": turn_hash,
                 "started_at": datetime.now(timezone.utc).isoformat(),
             }
         )
         state["last_dirty_reason"] = "subagent:unknown_stop"
-    if state.get("status") not in ("compacting", "recovery_required", "compact_failed"):
-        state["status"] = "dirty"
-        state["pending_turn_hash"] = state.get("pending_turn_hash") or digest(turn_id)
-    state["last_dirty_reason"] = state.get("last_dirty_reason") or "subagent:stop"
+    if not idempotent:
+        if state.get("status") == "compacting" and state.get("origin_status") == "safe":
+            # New subagent evidence that arrives during a safe-origin compact
+            # changes the truth of that attempt. Persist a dirty origin so the
+            # compact SessionStart requires recovery instead of restoring safe.
+            state["origin_status"] = "dirty"
+            state["pending_turn_hash"] = state.get("pending_turn_hash") or turn_hash
+            state["dirty_generation"] = int(state.get("dirty_generation", 0)) + 1
+        elif state.get("status") in ("compacting", "recovery_required", "compact_failed"):
+            state["pending_turn_hash"] = state.get("pending_turn_hash") or turn_hash
+        else:
+            if state.get("status") != "dirty":
+                state["dirty_generation"] = int(state.get("dirty_generation", 0)) + 1
+            state["status"] = "dirty"
+            state["pending_turn_hash"] = state.get("pending_turn_hash") or turn_hash
+    if not idempotent:
+        state["last_dirty_reason"] = "subagent:unknown_stop" if stop_status == "unknown" else "subagent:stop"
     state["last_subagent_id_hash"] = agent_hash
     state["last_subagent_type"] = _safe_agent_type(agent_type)
     state["last_subagent_status"] = stop_status
-    state["last_subagent_message_hash"] = digest(last_assistant_message)
+    state["last_subagent_message_hash"] = message_hash
     try:
         write_state(state_path(session_dir), state)
     except OSError as exc:
@@ -1098,6 +1232,7 @@ def mark_subagent_stopped(
         agent_id=agent_id,
         agent_type=_safe_agent_type(agent_type),
         message=last_assistant_message,
+        idempotent=idempotent,
     )
     return session_dir, state, f"subagent event evidence failed: {event_error}" if event_error else None
 

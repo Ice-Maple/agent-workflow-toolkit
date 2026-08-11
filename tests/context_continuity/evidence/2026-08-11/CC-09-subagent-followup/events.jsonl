@@ -1,0 +1,6 @@
+{"case":"pre_fix_reproduction","timestamp":"2026-08-11T03:12:11.405233Z","event":"SubagentStart","agent":"agent-a","status":"dirty","active_subagent_count":2}
+{"case":"pre_fix_reproduction","timestamp":"2026-08-11T03:17:19.194252Z","event":"SubagentStop","agent":"agent-a","phase":"initial_completion","status":"dirty","active_subagent_count":1}
+{"case":"pre_fix_reproduction","timestamp":"2026-08-11T03:22:46.545874Z","event":"SubagentStop","agent":"agent-a","phase":"followup_without_new_start","status":"dirty","active_subagent_count":2,"observed_defect":"false_unknown_added"}
+{"case":"post_fix_host_smoke","timestamp":"2026-08-11T04:10:36.497734Z","event":"SubagentStart","agent":"agent-b","status":"dirty","active_subagent_count":1}
+{"case":"post_fix_host_smoke","timestamp":"2026-08-11T04:36:54.473321Z","event":"SubagentStop","agent":"agent-b","phase":"initial_completion","status":"dirty","active_subagent_count":0,"lifecycle_status":"completed","idempotent":false}
+{"case":"post_fix_host_smoke","timestamp":"2026-08-11T04:39:31.523966Z","event":"SubagentStop","agent":"agent-b","phase":"followup_without_new_start","status":"dirty","active_subagent_count":0,"lifecycle_status":"completed","idempotent":false}

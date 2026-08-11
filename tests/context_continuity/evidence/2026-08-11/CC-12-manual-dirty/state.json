@@ -1,0 +1,17 @@
+{
+  "before": {
+    "status": "dirty"
+  },
+  "after_session_start": {
+    "status": "recovery_required",
+    "origin_status": "dirty",
+    "emergency_manifest": true,
+    "emergency_manifest_estimated_tokens": 159,
+    "recovery_marker_verified": "W3_DIRTY_MARKER_READY"
+  },
+  "after_seal": {
+    "status": "safe",
+    "checkpoint_seq": 2,
+    "last_compact_result": "sealed_after_recovery"
+  }
+}

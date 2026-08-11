@@ -16,7 +16,9 @@ from tools.context_continuity.seal import main as seal_main
 from tools.context_continuity.session_start import main as session_start_main
 from tools.context_continuity.state import (
     MAX_HOT_ESTIMATED_TOKENS,
+    MAX_RECENT_COMPLETED_SUBAGENTS,
     MAX_WARM_ESTIMATED_TOKENS,
+    _remember_subagent_completion,
     _tool_input_digest,
     append_event,
     digest,
@@ -27,6 +29,7 @@ from tools.context_continuity.state import (
     read_state,
     sanitize_pointer,
     session_directory,
+    write_state,
 )
 
 
@@ -315,6 +318,178 @@ class Wave3StateTests(unittest.TestCase):
             code, result = self._seal(home, workspace, session_dir, "# Goal\n- Next: continue after agent\n")
             self.assertEqual(code, 0, result)
             self.assertEqual(read_state(session_dir)["status"], "safe")
+
+    def test_completed_subagent_stop_replay_and_followup_remain_attributable(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as workspace:
+            self._session_start(home, workspace)
+            session_dir = session_directory("wave3-session", home=Path(home))
+            with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": home}):
+                _, state, error = mark_subagent_started(
+                    "wave3-session", workspace, "initial-turn", "agent-1", "researcher"
+                )
+                self.assertIsNone(error)
+                _, state, error = mark_subagent_stopped(
+                    "wave3-session", workspace, "initial-turn", "agent-1", "researcher", "initial result"
+                )
+            self.assertIsNone(error)
+            self.assertEqual(state["last_subagent_status"], "completed")
+            self.assertEqual(state["active_subagents"], [])
+            self.assertEqual(len(state["recent_completed_subagents"]), 1)
+
+            code, result = self._seal(home, workspace, session_dir, "# Goal\n- Next: request follow-up\n")
+            self.assertEqual(code, 0, result)
+            sealed_sequence = result["checkpoint_seq"]
+            sealed_generation = read_state(session_dir)["dirty_generation"]
+
+            # An exact callback replay is state-idempotent: it remains safe and
+            # does not create a new pending turn or unknown lifecycle entry.
+            with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": home}):
+                _, state, error = mark_subagent_stopped(
+                    "wave3-session", workspace, "initial-turn", "agent-1", "researcher", "initial result"
+                )
+            self.assertIsNone(error)
+            self.assertEqual(state["status"], "safe")
+            self.assertIsNone(state["pending_turn_hash"])
+            self.assertEqual(state["checkpoint_seq"], sealed_sequence)
+            self.assertEqual(state["active_subagents"], [])
+            replay_event = json.loads((session_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(replay_event["lifecycle_status"], "completed")
+            self.assertTrue(replay_event["idempotent"])
+
+            # Codex App follow-up_task reuses the same agent id and emits only
+            # another stop. It is new dirty evidence, but never an orphan.
+            with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": home}):
+                _, state, error = mark_subagent_stopped(
+                    "wave3-session", workspace, "followup-turn", "agent-1", "researcher", "follow-up result"
+                )
+            self.assertIsNone(error)
+            self.assertEqual(state["status"], "dirty")
+            self.assertEqual(state["last_subagent_status"], "completed")
+            self.assertEqual(state["active_subagents"], [])
+            self.assertEqual(len(state["recent_completed_subagents"]), 2)
+            self.assertEqual(state["dirty_generation"], sealed_generation + 1)
+            self.assertEqual(state["last_dirty_reason"], "subagent:stop")
+            followup_event = json.loads((session_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(followup_event["lifecycle_status"], "completed")
+            self.assertFalse(followup_event["idempotent"])
+            code, result = self._seal(home, workspace, session_dir, "# Goal\n- Next: continue after follow-up\n")
+            self.assertEqual(code, 0, result)
+
+            # The bounded ledger retains more than the latest completion, so
+            # an older out-of-order replay also remains idempotent.
+            with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": home}):
+                _, state, error = mark_subagent_stopped(
+                    "wave3-session", workspace, "initial-turn", "agent-1", "researcher", "initial result"
+                )
+            self.assertIsNone(error)
+            self.assertEqual(state["status"], "safe")
+            self.assertIsNone(state["pending_turn_hash"])
+            replay_event = json.loads((session_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+            self.assertTrue(replay_event["idempotent"])
+
+    def test_old_stop_replay_does_not_finish_a_new_running_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as workspace:
+            self._session_start(home, workspace)
+            session_dir = session_directory("wave3-session", home=Path(home))
+            with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": home}):
+                _, _, error = mark_subagent_started(
+                    "wave3-session", workspace, "initial-turn", "agent-1", "researcher"
+                )
+                self.assertIsNone(error)
+                _, _, error = mark_subagent_stopped(
+                    "wave3-session", workspace, "initial-turn", "agent-1", "researcher", "initial result"
+                )
+                self.assertIsNone(error)
+            code, result = self._seal(home, workspace, session_dir, "# Goal\n- Next: start follow-up\n")
+            self.assertEqual(code, 0, result)
+
+            with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": home}):
+                _, state, error = mark_subagent_started(
+                    "wave3-session", workspace, "new-turn", "agent-1", "researcher"
+                )
+                self.assertIsNone(error)
+                _, state, error = mark_subagent_stopped(
+                    "wave3-session", workspace, "initial-turn", "agent-1", "researcher", "initial result"
+                )
+            self.assertIsNone(error)
+            self.assertEqual(state["last_subagent_status"], "completed")
+            self.assertEqual(len(state["active_subagents"]), 1)
+            self.assertEqual(state["active_subagents"][0]["status"], "running")
+            replay_event = json.loads((session_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+            self.assertTrue(replay_event["idempotent"])
+            code, result = self._seal(home, workspace, session_dir, "# Goal\n- Next: still running\n")
+            self.assertEqual(code, 2)
+            self.assertIn("subagent", result["reason"])
+
+            # Real App callbacks can use different turn ids for a legitimate
+            # start and first stop; agent identity remains the lifecycle key.
+            with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": home}):
+                _, state, error = mark_subagent_stopped(
+                    "wave3-session", workspace, "agent-stop-turn", "agent-1", "researcher", "new result"
+                )
+            self.assertIsNone(error)
+            self.assertEqual(state["active_subagents"], [])
+            code, result = self._seal(home, workspace, session_dir, "# Goal\n- Next: reconcile new result\n")
+            self.assertEqual(code, 0, result)
+
+    def test_known_followup_stop_during_safe_compact_requires_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as workspace:
+            self._session_start(home, workspace)
+            session_dir = session_directory("wave3-session", home=Path(home))
+            with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": home}):
+                _, _, error = mark_subagent_started(
+                    "wave3-session", workspace, "initial-turn", "agent-1", "researcher"
+                )
+                self.assertIsNone(error)
+                _, _, error = mark_subagent_stopped(
+                    "wave3-session", workspace, "initial-turn", "agent-1", "researcher", "initial result"
+                )
+                self.assertIsNone(error)
+            code, result = self._seal(home, workspace, session_dir, "# Goal\n- Next: compact safely\n")
+            self.assertEqual(code, 0, result)
+            generation = read_state(session_dir)["dirty_generation"]
+
+            self._compact(home, workspace, phase="pre", turn="compact-turn")
+            state = read_state(session_dir)
+            self.assertEqual(state["status"], "compacting")
+            self.assertEqual(state["origin_status"], "safe")
+            with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": home}):
+                _, state, error = mark_subagent_stopped(
+                    "wave3-session", workspace, "followup-turn", "agent-1", "researcher", "follow-up result"
+                )
+            self.assertIsNone(error)
+            self.assertEqual(state["status"], "compacting")
+            self.assertEqual(state["origin_status"], "dirty")
+            self.assertIsNotNone(state["pending_turn_hash"])
+            self.assertEqual(state["dirty_generation"], generation + 1)
+
+            self._compact(home, workspace, phase="post", turn="compact-turn")
+            recovery = self._session_start(home, workspace, source="compact")
+            self.assertIn("Recovery is required", recovery["hookSpecificOutput"]["additionalContext"])
+            self.assertEqual(read_state(session_dir)["status"], "recovery_required")
+
+    def test_completed_subagent_tombstones_are_bounded_and_eviction_fails_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as workspace:
+            self._session_start(home, workspace)
+            session_dir = session_directory("wave3-session", home=Path(home))
+            state = read_state(session_dir)
+            for index in range(MAX_RECENT_COMPLETED_SUBAGENTS + 1):
+                _remember_subagent_completion(
+                    state,
+                    agent_hash=digest(f"agent-{index}"),
+                    turn_hash=digest(f"turn-{index}"),
+                    message_hash=digest(f"result-{index}"),
+                )
+            self.assertEqual(len(state["recent_completed_subagents"]), MAX_RECENT_COMPLETED_SUBAGENTS)
+            write_state(session_dir / "state.json", state)
+
+            with patch.dict("os.environ", {"CODEX_CONTEXT_CONTINUITY_HOME": home}):
+                _, state, error = mark_subagent_stopped(
+                    "wave3-session", workspace, "late-replay", "agent-0", "researcher", "late result"
+                )
+            self.assertIsNone(error)
+            self.assertEqual(state["last_subagent_status"], "unknown")
+            self.assertEqual(len(state["active_subagents"]), 1)
 
     def test_orphan_subagent_stop_cannot_be_sealed_as_safe(self) -> None:
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as workspace:

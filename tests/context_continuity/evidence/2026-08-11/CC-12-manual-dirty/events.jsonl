@@ -1,0 +1,4 @@
+{"timestamp":"2026-08-11T05:48:41.906722Z","event":"PreCompact","trigger":"manual","origin_status":"dirty","emergency_manifest_estimated_tokens":159}
+{"timestamp":"2026-08-11T05:48:58.378238Z","event":"PostCompact","trigger":"manual"}
+{"timestamp":"2026-08-11T05:49:44.861936Z","event":"SessionStart","source":"compact","status":"recovery_required","origin_status":"dirty"}
+{"timestamp":"2026-08-11T05:51:10.208883Z","event":"Seal","status":"safe","checkpoint_seq":2,"last_compact_result":"sealed_after_recovery"}

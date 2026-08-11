@@ -1,0 +1,19 @@
+{
+  "case_id": "CC-09-subagent-followup",
+  "captured_at": "2026-08-11T12:41:14+08:00",
+  "host": {
+    "application": "Codex Windows App",
+    "version": "26.803.5235.0",
+    "package_signature": "Store",
+    "architecture": "x64"
+  },
+  "repository_head": "130a901061908834ecf2c1a401d58aa822bf4333",
+  "working_tree_note": "state.py and its regression tests are intentionally uncommitted Wave 3 closure changes",
+  "sha256": {
+    "user_hooks_json": "8dcdff5fa1712a4de94fb368e29a50c9c9e06075121c9e1d52f11e6787131575",
+    "state_py": "b4348f5075368a6a1d67f75d83929cebcb8ba31f20593c1868acf03c87dc7c10",
+    "subagent_stop_py": "021419c3f7c254a8556d2a1404f976c7603f2dd0cdce939471b4013df27c820e",
+    "test_wave3_state_py": "e9bbd53c17a05ed7a0a84414f59873f14008e3cadf08f9e1f7c3eea734cd6f3a"
+  },
+  "privacy": "Only lifecycle type, time, status, bounded counts and pseudonymous agent labels are retained. Raw ids, messages, tool input and transcript pointers are omitted."
+}

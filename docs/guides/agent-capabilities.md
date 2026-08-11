@@ -11,8 +11,8 @@
 | 你想做什么 | 功能类型 | 主要入口 | 当前状态 |
 | --- | --- | --- | --- |
 | 把模糊想法梳理成需求、比较方案并生成 brainstorm 文档 | Skill | [`skills/brainstorming/SKILL.md`](../../skills/brainstorming/SKILL.md) | 可用的 Skill |
-| 降低 Codex 自动压缩后的遗忘和重复执行 | Hook 运行包 | [`tests/context_continuity/fixtures/wave3/hooks.example.json`](../../tests/context_continuity/fixtures/wave3/hooks.example.json) | Wave 3 脚本级实现；真实 App 宿主仍待验证 |
-| 验证上下文连续性 Hook 的本地行为 | 测试/CLI smoke | [`tests/context_continuity/README.md`](../../tests/context_continuity/README.md) | Wave 0–3 回归和本地 smoke 已有 |
+| 降低 Codex 自动压缩后的遗忘和重复执行 | Hook 运行包 | [`tests/context_continuity/fixtures/wave3/hooks.example.json`](../../tests/context_continuity/fixtures/wave3/hooks.example.json) | Wave 3 已对当前支持的 Windows ChatGPT/Codex App 宿主关闭 |
+| 验证上下文连续性 Hook 的本地与宿主行为 | 测试/App smoke | [`tests/context_continuity/README.md`](../../tests/context_continuity/README.md) | 70 项回归、逐 case 宿主证据和独立复核均已通过 |
 | 校验多 Agent 协同请求/响应协议 | Go CLI + Protocol | [`cmd/agent-workflow-core/main.go`](../../cmd/agent-workflow-core/main.go) | Wave 0 协议骨架 |
 | 接入 Cursor Agent 外部 Adapter | Go Adapter | [`internal/adapters/cursor/cursor.go`](../../internal/adapters/cursor/cursor.go) | 受控只读 Windows 路径已随 Wave 4 验收为 `experimental` |
 | 接入 Claude Code 外部 Adapter | Go Adapter | [`internal/adapters/claude/claude.go`](../../internal/adapters/claude/claude.go) | 受控只读路径已随 Wave 4 验收为 `experimental` |
@@ -45,12 +45,16 @@
 - 跨环境安装与还原：[`docs/guides/codex-context-continuity-global-setup.md`](codex-context-continuity-global-setup.md)
 - 测试说明：[`tests/context_continuity/README.md`](../../tests/context_continuity/README.md)
 - 本地 smoke 证据：[`tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md`](../../tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md)
+- 当前 Windows App 宿主证据：[`tests/context_continuity/evidence/2026-08-11/W3-app-host-smoke.md`](../../tests/context_continuity/evidence/2026-08-11/W3-app-host-smoke.md)
 
-启用时，宿主通过 `.codex/hooks.json` 自动调用这些脚本：
+Wave 3 已对 Windows ChatGPT/Codex App `26.803.5235.0` Store x64 关闭，
+Wave 4 可以从评测开始；其他机器或宿主版本仍需单独加入兼容性矩阵。
+
+启用时，宿主通过已信任的用户级 `~/.codex/hooks.json` 或项目级
+`.codex/hooks.json` 自动调用这些脚本：
 
 ```text
 SessionStart    → session_start.py
-Stop            → stop.py
 PreCompact      → pre_compact.py
 PostCompact     → post_compact.py
 PreToolUse      → pre_tool_use.py
@@ -58,7 +62,9 @@ SubagentStart   → subagent_start.py
 SubagentStop    → subagent_stop.py
 ```
 
-其中 [`seal.py`](../../tools/context_continuity/seal.py) 是模型根据 Stop Hook 提示运行的手动确认入口；
+Wave 3 默认配置不注册 `Stop`；[`stop.py`](../../tools/context_continuity/stop.py) 只保留给
+历史严格 Fixture 回归。其中 [`seal.py`](../../tools/context_continuity/seal.py) 是恢复核对或
+显式保存 checkpoint 后运行的手动确认入口；
 [`state.py`](../../tools/context_continuity/state.py) 和 [`tool_policy.py`](../../tools/context_continuity/tool_policy.py)
 是内部状态与分类实现，不是给用户单独调用的功能入口。
 

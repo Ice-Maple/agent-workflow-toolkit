@@ -1,0 +1,19 @@
+{
+  "locked_probe": {
+    "sha256": "a7e374f1c0c6d97a19690f2ae7a04ba92287c9db025fb77d1d1ed02d6520148d",
+    "synthetic_value": "W3_FAIL_OPEN_LOCKED_9B32D6E145AC407F",
+    "present_in_target_prompt_or_context": false,
+    "observed_in_tool_result": true,
+    "assistant_completed_marker": "W3_FAIL_OPEN_LOCKED_TURN_COMPLETED"
+  },
+  "after_unlock_control": {
+    "synthetic_value": "W3_FAIL_OPEN_AFTER_C7F45A128DBE4930",
+    "observed_in_tool_result": true,
+    "assistant_completed_marker_observed": true
+  },
+  "cleanup": {
+    "lock_helper_stopped": true,
+    "lock_helper_process_exited": true,
+    "temporary_probe_removed": true
+  }
+}

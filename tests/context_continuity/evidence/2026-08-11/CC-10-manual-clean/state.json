@@ -1,0 +1,13 @@
+{
+  "before": {
+    "status": "clean",
+    "checkpoint_seq": 0,
+    "emergency_manifest": false
+  },
+  "after": {
+    "status": "clean",
+    "checkpoint_seq": 0,
+    "recovery_required": false,
+    "emergency_manifest": false
+  }
+}

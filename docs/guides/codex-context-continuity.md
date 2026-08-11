@@ -16,7 +16,7 @@
 - 如果工作做到一半突然被压缩，先写一张更小的临时便签；
 - 只有压缩时存在外部写入或异常状态，才要求核对磁盘结果并恢复。
 
-## 当前实施状态（2026-08-09）
+## 当前实施状态（2026-08-11）
 
 当前版本已经完成 Wave 0–3 的脚本实现，并已应用到本机用户级 Codex 全局配置。当前状态如下：
 
@@ -25,11 +25,11 @@
 | Wave 0–3 核心 Hook | 已完成 | 包含会话启动、压缩前后恢复、工具/子 Agent 生命周期记录、checkpoint/seal 和并发安全。 |
 | 最近两项修复 | 已完成 | 缺少 `session_id` 时静默放行；简单且可证明只读的 PowerShell 命令不再误标 `dirty`。 |
 | 本机全局应用 | 已完成 | `%USERPROFILE%\.codex\hooks.json` 直接引用本仓库脚本；当前注册 `SessionStart`、`PreToolUse`、`PreCompact`、`PostCompact`、`SubagentStart`、`SubagentStop`，不注册 `Stop`。 |
-| 本地验证 | 已完成 | 66 项连续性测试、编译检查和差异空白检查通过。 |
-| 当前 App 事件观察 | 部分完成 | 已观察到真实 `PreCompact(auto)` → `PostCompact` → `SessionStart(source=compact)` 恢复链路；仍需在其他宿主/环境重复验证。 |
-| 精确安排压缩时机 | 未实现 | 当前 Hook 不发起或延后原生自动压缩；只负责压缩期间的恢复保护。需要另行实施 Wave 4 控制器。 |
+| 本地验证 | 已完成 | 70 项连续性测试、编译检查和差异空白检查通过。 |
+| 当前 App 事件观察 | 已关闭（当前支持宿主） | Windows ChatGPT/Codex App `26.803.5235.0` Store x64 已覆盖 dirty auto、clean/safe/dirty manual compact、真实 `PreToolUse`/Subagent、普通 turn 无 continuation，以及 session-local lock fault injection 下的 fail-open；版本化证据和独立复核均通过。 |
+| 精确安排压缩时机 | 未实现、条件触发 | 当前 Hook 不发起或延后原生自动压缩；只负责压缩期间的恢复保护。是否实施 Wave 4 控制器由真实评测指标决定。 |
 
-因此，“Wave 3 已完成”指恢复型 Hook 能力和全局非阻塞配置已完成，不代表已经实现“压缩只发生在 turn 边界”或完成所有 Codex App 宿主的验收。
+因此，Wave 3 已对当前支持宿主正式关闭，Wave 4 可以启动；这仍不代表已经实现“压缩只发生在 turn 边界”，也不外推到其他 App 版本或机器。
 
 ## Wave 分别做什么
 
@@ -40,10 +40,10 @@ Wave 是开发阶段，不是需要用户切换的四种模式。
 | Wave 0 | 只观察 Codex App 什么时候发送生命周期事件，不改变任务行为。 | 已完成，主要用于宿主验证 |
 | Wave 1 | 每轮结束时保存一份 checkpoint，下一轮或压缩后恢复。 | 已完成 |
 | Wave 2 | 处理中途压缩：保存紧急便签，压缩后要求核对并恢复。 | 已完成，当前初步可用版本 |
-| Wave 3 | 让工具调用和子 Agent 自动标记“工作是否变脏”，限制恢复信息大小，并提供非阻塞全局配置。 | 已完成脚本级实现与本地回归，真实 App smoke 待验证 |
-| Wave 4 | 用真实任务统计效果；只有确实需要时，才考虑精确安排压缩时机。 | 计划中 |
+| Wave 3 | 让工具调用和子 Agent 自动标记“工作是否变脏”，限制恢复信息大小，并提供非阻塞全局配置。 | 当前支持宿主已关闭；其他机器/版本进入兼容性矩阵 |
+| Wave 4 | 用真实任务统计效果；只有确实需要时，才考虑精确安排压缩时机。 | 可启动评测；精确调度仍为条件触发 |
 
-日常使用至少需要 Wave 2；如果希望工具调用和子 Agent 也自动参与状态判断，可以改用 Wave 3 Fixture。Wave 0 不需要一直开启，Wave 4 仍是计划中的评测与调度阶段。
+日常使用至少需要 Wave 2；如果希望工具调用和子 Agent 也自动参与状态判断，可以改用 Wave 3 Fixture。Wave 0 不需要一直开启；Wave 4 现可从评测开始，调度扩展是否实施仍由指标决定。
 
 ## 当前版本能做什么
 
@@ -110,7 +110,11 @@ $template.Replace("<REPO_ROOT>", $repo) |
 $env:CODEX_CONTEXT_CONTINUITY_HOME = Join-Path $smokeRoot "state"
 ```
 
-然后用这个临时 workspace 启动或重启 Codex App，并确认它加载了该 workspace 的 `.codex/hooks.json`。如果 App 已经在运行，旧进程可能没有新的环境变量，需要重启后再测试。
+然后用这个临时 workspace 启动或重启 Codex App。当前 Windows App 的审核入口是
+`Settings -> Hooks -> From Projects`：先确认该 workspace 已被信任，再检查项目
+Hook 内容、选择 `Trust` 并执行 `Reload hooks`。App 对话中的 `/hooks` 只是普通消息；
+它是 Codex CLI 的交互命令，不能代替 App Settings 审核。若 App 已经在运行，旧进程
+也可能没有新的环境变量，需要重启后再测试。
 
 ### 3. 做一个很小的验证任务
 
@@ -232,7 +236,9 @@ Wave 2 的 SessionStart Fixture 使用 `1200`；Wave 3 使用 `800`，因为 Wav
 
 ### 出现 `Write a concise checkpoint.md` 或 `<hook_prompt>`
 
-说明仍加载着旧版阻塞式 `Stop`。先在设置或 `/hooks` 中关闭它，运行当前安装器升级 `hooks.json`，重启 App 后再核对 Hook 来源。把同一 Hook 移到项目级不能解决循环。
+说明仍加载着旧版阻塞式 `Stop`。在 App 中通过 `Settings -> Hooks` 关闭它；
+Codex CLI 才使用 `/hooks`。随后运行当前安装器升级 `hooks.json`，重启宿主并核对
+Hook 来源。把同一 Hook 移到项目级不能解决循环。
 
 ### 出现 `recovery_required`
 
@@ -255,14 +261,17 @@ Wave 2 的 SessionStart Fixture 使用 `1200`；Wave 3 使用 `800`，因为 Wav
 检查：
 
 1. App 是否重新启动过；
-2. workspace 是否真的加载了 `.codex/hooks.json`；
-3. `<REPO_ROOT>` 是否已替换；
-4. `CODEX_CONTEXT_CONTINUITY_HOME` 是否在 App 进程中可见；
-5. Windows 是否使用了 `commandWindows` 对应的 Python 命令。
+2. App 的 `Settings -> Hooks -> From Projects` 是否发现该 workspace，目录与具体 Hook 是否都已信任，并且是否执行过 `Reload hooks`；
+3. 不要把 App 对话中的 `/hooks` 当作审核入口；Codex CLI 才支持该交互命令；
+4. `<REPO_ROOT>` 是否已替换；
+5. `CODEX_CONTEXT_CONTINUITY_HOME` 是否在 App 进程中可见；
+6. Windows 是否使用了 `commandWindows` 对应的 Python 命令。
 
 ## 如何停用和回滚
 
-在隔离 workspace 中，移除或改名该 workspace 的 `.codex/hooks.json`，然后重启 Codex App；同时在当前 shell 中清除：
+在隔离 workspace 中，先在 App 的 `Settings -> Hooks` 禁用项目 Hook，再移除或改名
+该 workspace 的 `.codex/hooks.json`，执行 `Reload hooks` 或重启 App；Codex CLI 可在
+`/hooks` 中禁用。若使用了当前 shell 的临时状态目录，同时清除：
 
 ```powershell
 Remove-Item Env:CODEX_CONTEXT_CONTINUITY_HOME -ErrorAction SilentlyContinue
@@ -286,7 +295,10 @@ Remove-Item Env:CODEX_CONTEXT_CONTINUITY_HOME -ErrorAction SilentlyContinue
 - 真实 Codex App 在所有版本中的事件顺序完全一致。
 - 只在任务结束时自动压缩，或精确安排压缩时机。
 
-Wave 3 的本地脚本 smoke 已通过，但真实宿主 smoke 仍需单独验证；在此之前建议只在隔离 workspace 中启用。
+Wave 3 的本地脚本 smoke 和当前 Windows App 宿主 gate 已完成：dirty-auto 恢复、
+clean/safe/dirty manual compact、普通 turn 无 continuation、Subagent follow-up/replay
+以及真实 `PreToolUse` 持久化失败时的 fail-open 均有观察；版本化证据和独立复核
+也已通过，当前支持宿主正式关闭。其他 App 版本或机器仍应先在隔离 workspace 中验证。
 
 ## 相关实现和验证材料
 
@@ -298,3 +310,5 @@ Wave 3 的本地脚本 smoke 已通过，但真实宿主 smoke 仍需单独验�
 - [全局安装/还原脚本](../../tools/context_continuity/install_global.py)
 - [本地 CLI smoke 证据](../../tests/context_continuity/evidence/2026-08-07/W2-local-cli-smoke.md)
 - [Wave 3 本地 CLI smoke 证据](../../tests/context_continuity/evidence/2026-08-07/W3-local-cli-smoke.md)
+- [Wave 3 全局安装 smoke 证据](../../tests/context_continuity/evidence/2026-08-08/W3-nonblocking-global-smoke.md)
+- [Wave 3 当前 Windows App 宿主证据](../../tests/context_continuity/evidence/2026-08-11/W3-app-host-smoke.md)
