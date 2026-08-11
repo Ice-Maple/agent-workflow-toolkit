@@ -1,7 +1,7 @@
 # 多 Agent 协同 Workflow MVP 实施 Wave 计划
 
 - 日期：2026-08-07
-- 状态：Wave 0–2 已完成；Wave 3 三个外部 Adapter 已完成实现、真实 smoke 和 review closure；Wave 4 硬化与 `experimental` 验收进行中
+- 状态：Wave 0–4 已完成；四条受控只读执行路径已验收为 `experimental`；Wave 5 尚未启动
 - 设计基线：[多 Agent 协同 Workflow MVP](../brainstorms/2026-08-07-multi-agent-orchestration-mvp.md)
 - 独立复审处理：[复审问题处理记录](../reviews/2026-08-07-multi-agent-orchestration-mvp-rereview-closure.md)
 - 研究与执行证据：[Cursor Agent 评审派发与结果交付调查](../research/2026-08-07-cursor-agent-review-delivery-investigation.md)
@@ -327,9 +327,9 @@ Wave 0 通过后，第一轮实际实现建议按以下原子任务建立提交�
 
 Wave 0 的第一批可执行产物已经落盘：protocol v1、能力探针入口、fake contract 和证据格式。当前已进入 Wave 1，完成了 `Task/Revision/Node/Attempt/HostAction/Event` 的第一版状态模型、文件 snapshot/event 存储、显式 binding preflight、host action lease、request/action 幂等、checkpoint、Goal authority 骨架以及 fake E2E vertical slice。
 
-Wave 1 的 Go 核心实现、文件存储、TaskGateway、策略门禁和 fake E2E 已完成；Wave 2 已落地 Controller Skill、Native action contract、fake Native executor，并已用 Codex App 原生 Subagent 完成真实 launch/observe/completion、artifact delivery 和 `approve` 人工检查点，详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`。Wave 3 的 Cursor Agent、Claude Code、Codex CLI 只读 Adapter 均已完成实现、真实 smoke、独立 review 和 targeted closure，汇总见 [Wave 3 当前状态](../reviews/2026-08-09-wave3-current-status.md)。当前不将任何外部 Adapter 标记为 `experimental`。
+Wave 1 的 Go 核心实现、文件存储、TaskGateway、策略门禁和 fake E2E 已完成；Wave 2 已落地 Controller Skill、Native action contract、fake Native executor，并已用 Codex App 原生 Subagent 完成真实 launch/observe/completion、artifact delivery 和 `approve` 人工检查点，详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`。Wave 3 的 Cursor Agent、Claude Code、Codex CLI 只读 Adapter 均已完成实现、真实 smoke、独立 review 和 targeted closure，汇总见 [Wave 3 当前状态](../reviews/2026-08-09-wave3-current-status.md)。
 
-Wave 4 当前工作从共享 JSONL replay、跨 Adapter lifecycle conformance 和可重放证据矩阵开始，详见 [Wave 4 baseline](../reviews/2026-08-10-wave4-baseline.md)。
+Wave 4 已完成共享 replay/conformance、四路径 smoke 汇总、Windows 稳定性与故障注入、跨 Adapter recovery/contamination、策略安全扩展和七维完整 benchmark；最终真实 Cursor 独立 review 已 PASS 且无 findings/未关闭 P0/P1。用户已按当前证据和只读边界批准 `experimental`，验收记录见 [`W4-experimental-acceptance.md`](../../tests/orchestration/evidence/2026-08-11/W4-experimental-acceptance.md)。`go test -race` 是 Windows CGO 工具链的可选补充验证，不是仓库运行依赖或本次验收阻塞项；Wave 5 未自动启动。
 ## Wave 3 implementation status update (2026-08-09)
 
 Cursor Agent, Claude Code and Codex CLI read-only Adapter slices have completed

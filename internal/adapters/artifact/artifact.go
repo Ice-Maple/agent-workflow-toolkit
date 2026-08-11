@@ -86,6 +86,13 @@ func ensureInside(workspace, path string) error {
 }
 
 func atomicReplace(path string, raw []byte) error {
+	return atomicReplaceWithHook(path, raw, nil)
+}
+
+// atomicReplaceWithHook is kept internal so tests can model an interruption
+// after the old destination has been moved aside. Production callers use
+// atomicReplace, which supplies no hook.
+func atomicReplaceWithHook(path string, raw []byte, hook func(step string) error) error {
 	file, err := os.CreateTemp(filepath.Dir(path), ".artifact-*")
 	if err != nil {
 		return fmt.Errorf("create artifact temporary file: %w", err)
@@ -109,9 +116,13 @@ func atomicReplace(path string, raw []byte) error {
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close artifact temporary file: %w", err)
 	}
-	if err := os.Rename(temporary, path); err == nil {
-		_ = os.Remove(path + ".previous")
-		return nil
+	// A non-nil hook is used only by tests to force the backup/install path on
+	// platforms whose Rename replaces an existing destination directly.
+	if hook == nil || !pathExists(path) {
+		if err := os.Rename(temporary, path); err == nil {
+			_ = os.Remove(path + ".previous")
+			return nil
+		}
 	}
 	// Windows does not replace an existing file with Rename. Move the old
 	// artifact to a recoverable sibling, install the new file, and restore the
@@ -124,12 +135,22 @@ func atomicReplace(path string, raw []byte) error {
 	if err := os.Rename(path, backup); err != nil {
 		return fmt.Errorf("backup existing artifact: %w", err)
 	}
+	if hook != nil {
+		if err := hook("after_backup"); err != nil {
+			return fmt.Errorf("atomic replace interrupted after backup: %w", err)
+		}
+	}
 	if err := os.Rename(temporary, path); err != nil {
 		_ = os.Rename(backup, path)
 		return fmt.Errorf("install artifact: %w", err)
 	}
 	_ = os.Remove(backup)
 	return nil
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // recoverPrevious restores the last complete artifact when a process was

@@ -14,9 +14,9 @@
 | 降低 Codex 自动压缩后的遗忘和重复执行 | Hook 运行包 | [`tests/context_continuity/fixtures/wave3/hooks.example.json`](../../tests/context_continuity/fixtures/wave3/hooks.example.json) | Wave 3 脚本级实现；真实 App 宿主仍待验证 |
 | 验证上下文连续性 Hook 的本地行为 | 测试/CLI smoke | [`tests/context_continuity/README.md`](../../tests/context_continuity/README.md) | Wave 0–3 回归和本地 smoke 已有 |
 | 校验多 Agent 协同请求/响应协议 | Go CLI + Protocol | [`cmd/agent-workflow-core/main.go`](../../cmd/agent-workflow-core/main.go) | Wave 0 协议骨架 |
-| 接入 Cursor Agent 外部 Adapter | Go Adapter | [`internal/adapters/cursor/cursor.go`](../../internal/adapters/cursor/cursor.go) | Wave 3 只读 Windows 路径已完成真实 smoke、独立 review 和 targeted closure；尚未标记 `experimental` |
-| 接入 Claude Code 外部 Adapter | Go Adapter | [`internal/adapters/claude/claude.go`](../../internal/adapters/claude/claude.go) | Wave 3 只读路径已完成真实 smoke、独立 review 和 targeted closure；尚未标记 `experimental` |
-| 接入 Codex CLI 外部 Adapter | Go Adapter | [`internal/adapters/codexcli/codex.go`](../../internal/adapters/codexcli/codex.go) | Wave 3 只读路径已完成真实 smoke、独立 review 和 targeted closure；尚未标记 `experimental` |
+| 接入 Cursor Agent 外部 Adapter | Go Adapter | [`internal/adapters/cursor/cursor.go`](../../internal/adapters/cursor/cursor.go) | 受控只读 Windows 路径已随 Wave 4 验收为 `experimental` |
+| 接入 Claude Code 外部 Adapter | Go Adapter | [`internal/adapters/claude/claude.go`](../../internal/adapters/claude/claude.go) | 受控只读路径已随 Wave 4 验收为 `experimental` |
+| 接入 Codex CLI 外部 Adapter | Go Adapter | [`internal/adapters/codexcli/codex.go`](../../internal/adapters/codexcli/codex.go) | 受控只读路径已随 Wave 4 验收为 `experimental` |
 | 了解多 Agent MVP 的整体设计和 Wave | 设计/计划 | [`docs/plans/2026-08-07-multi-agent-orchestration-mvp-waves.md`](../plans/2026-08-07-multi-agent-orchestration-mvp-waves.md) | 计划与实现并行演进，不是直接运行入口 |
 
 ## 各功能的实际入口
@@ -80,7 +80,7 @@ SubagentStop    → subagent_stop.py
 `skills/multi-agent-orchestration/` Controller Skill 已完成真实 Codex App Native smoke、artifact 校验和人工批准，
 详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`；Wave 2 Native MVP 已验收。Wave 3 的 Cursor Agent、
 Claude Code 和 Codex CLI 只读 Adapter 均已完成实现、真实 smoke、独立 review 和 targeted closure，记录见
-[`Wave 3 当前状态`](../../docs/reviews/2026-08-09-wave3-current-status.md)。四条路径都尚未进入 `experimental` 阶段。
+[`Wave 3 当前状态`](../../docs/reviews/2026-08-09-wave3-current-status.md)。Wave 4 已补齐跨路径硬化、完整 benchmark 和最终独立 review；四条受控只读路径现已验收为 `experimental`，记录见 [`W4-experimental-acceptance.md`](../../tests/orchestration/evidence/2026-08-11/W4-experimental-acceptance.md)。
 
 ## 按目录判断“这是什么”
 
@@ -99,7 +99,7 @@ Claude Code 和 Codex CLI 只读 Adapter 均已完成实现、真实 smoke、独
 ## 当前仍存在的整理缺口
 
 1. 上下文连续性只有 Hook 入口，没有对应的模型行为 Skill。
-2. 多 Agent Wave 2 Native MVP 与 Wave 3 三个外部 Adapter 已完成；Wave 4 已建立共享 replay/conformance 基线，当前缺口是完整 smoke matrix、性能/稳定性/安全证据和 `experimental` 验收。
+2. 多 Agent Wave 0–4 已完成，四条受控只读执行路径已验收为 `experimental`；尚未开始 Wave 5 领域试点、写入能力或生产化验证。
 3. 以前各功能按各自 Wave 逐步加入，暂时没有统一的 capability manifest 或根级入口索引。
 
 因此，今后新增功能至少应同时登记：
@@ -118,3 +118,9 @@ Wave 3 的三个外部 Adapter 已关闭实现和 review checkpoint，但尚未�
 `experimental`。Wave 4 当前从共享 JSONL replay、跨 Adapter lifecycle
 conformance 和证据矩阵基线开始，详细范围见
 [`Wave 4 baseline`](../../docs/reviews/2026-08-10-wave4-baseline.md)。
+
+## Wave 4 status update (2026-08-11)
+
+Windows 真实进程树与 atomic replace 故障注入、跨 Adapter delivery
+recovery/contamination、策略与 Goal/revision/secret 边界以及原计划七个维度的
+完整 benchmark 已补齐；最终独立 Cursor review 已 PASS 且无 findings。用户已按当前证据和只读边界接受 Wave 4 为 `experimental`；Windows `go test -race` 需要额外 CGO/C 编译器工具链，但仓库本身不依赖 CGO，因此仅作为可选补充验证。该验收不自动进入 Wave 5。

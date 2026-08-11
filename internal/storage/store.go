@@ -609,7 +609,7 @@ func sanitizeValue(value any, key string) any {
 
 func isSensitiveKey(key string) bool {
 	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(key), "-", "_"), " ", "_"))
-	if normalized == "authorization" || normalized == "auth_header" || normalized == "authentication_header" || normalized == "cookie" {
+	if normalized == "authorization" || normalized == "auth_header" || normalized == "authentication_header" || normalized == "user_authorization_evidence" || normalized == "cookie" {
 		return true
 	}
 	for _, marker := range []string{"secret", "token", "password", "passwd", "api_key", "apikey", "credential", "private_key", "access_key"} {

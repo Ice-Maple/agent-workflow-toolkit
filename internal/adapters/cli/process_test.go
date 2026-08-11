@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +133,23 @@ func TestRunnerCapturesLongOutputWithoutTruncation(t *testing.T) {
 	}
 }
 
+func TestRunnerReportsUnexpectedProcessExit(t *testing.T) {
+	result, err := NewRunner().Run(t.Context(), Command{
+		Executable: os.Args[0],
+		Dir:        t.TempDir(),
+		Environment: []string{
+			"CLI_PROCESS_HELPER=1",
+			"CLI_PROCESS_HELPER_MODE=unexpected-exit",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !result.Started || result.ExitCode != 23 || result.Cancelled || result.TimedOut || result.KillConfirmed {
+		t.Fatalf("unexpected-exit evidence = %#v", result)
+	}
+}
+
 func TestRunnerRepeatedCancelIsStable(t *testing.T) {
 	killCalls := make(chan int, 1)
 	runner := &Runner{KillTree: func(pid int) error {
@@ -199,6 +219,48 @@ func TestMain(m *testing.M) {
 			_, _ = os.Stdout.Write([]byte{'\n'})
 			_, _ = os.Stderr.Write([]byte(strings.Repeat("E", 128*1024)))
 			_, _ = os.Stderr.Write([]byte{'\n'})
+		case "unexpected-exit":
+			fmt.Fprintln(os.Stderr, "CLI_UNEXPECTED_EXIT")
+			os.Exit(23)
+		case "tree-parent":
+			childPIDFile := os.Getenv("CLI_PROCESS_CHILD_PID_FILE")
+			child := exec.Command(os.Args[0])
+			configureCommand(child)
+			child.Env = append(os.Environ(),
+				"CLI_PROCESS_HELPER=1",
+				"CLI_PROCESS_HELPER_MODE=tree-child",
+				"CLI_PROCESS_CHILD_PID_FILE="+childPIDFile,
+			)
+			child.Stdout = os.Stdout
+			child.Stderr = os.Stderr
+			if err := child.Start(); err != nil {
+				fmt.Fprintln(os.Stderr, "CLI_TREE_CHILD_START_FAILED", err)
+				os.Exit(24)
+			}
+			fmt.Fprintf(os.Stdout, "CLI_TREE_PARENT_READY %d\n", child.Process.Pid)
+			time.Sleep(30 * time.Second)
+		case "tree-child":
+			if path := os.Getenv("CLI_PROCESS_CHILD_PID_FILE"); path != "" {
+				_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600)
+			}
+			fmt.Fprintln(os.Stdout, "CLI_TREE_CHILD_READY")
+			time.Sleep(30 * time.Second)
+		case "memory":
+			memoryBytes, err := strconv.Atoi(os.Getenv("CLI_PROCESS_MEMORY_BYTES"))
+			if err != nil || memoryBytes < 0 {
+				fmt.Fprintln(os.Stderr, "CLI_MEMORY_SIZE_INVALID")
+				os.Exit(25)
+			}
+			memory := make([]byte, memoryBytes)
+			for offset := 0; offset < len(memory); offset += 4096 {
+				memory[offset] = 1
+			}
+			if len(memory) > 0 {
+				memory[len(memory)-1] = 1
+			}
+			fmt.Fprintf(os.Stdout, "CLI_MEMORY_READY %d\n", len(memory))
+			time.Sleep(30 * time.Second)
+			runtime.KeepAlive(memory)
 		case "sleep":
 			fmt.Println("CLI_SLEEP_STARTED")
 			time.Sleep(30 * time.Second)

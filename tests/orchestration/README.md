@@ -8,7 +8,7 @@ Run the Go checks from the repository root:
 
 ```powershell
 go test -count=1 ./...
-go test -race ./...
+go test -race ./... # optional on Windows; requires a separate CGO/C compiler toolchain
 go vet ./...
 go build ./...
 go run ./cmd/agent-workflow-core --version
@@ -77,6 +77,19 @@ go test -run '^TestRealCursorWave4Review$' -v ./internal/adapters/cursor
 The sanitized review artifact is
 [`2026-08-10-wave4-cursor-review.md`](../../docs/reviews/2026-08-10-wave4-cursor-review.md).
 
+The final Wave 4 experimental-readiness review is separately opt-in:
+
+```powershell
+$env:CURSOR_ADAPTER_WAVE4_FINAL_REVIEW='1'
+$env:CURSOR_ADAPTER_EXECUTABLE='C:\Users\<user>\AppData\Local\cursor-agent\agent.cmd'
+$env:CURSOR_ADAPTER_SMOKE_WORKSPACE='E:\projects\agent-workflow-toolkit'
+$env:CURSOR_ADAPTER_SMOKE_MODEL='cursor-grok-4.5-high'
+go test -run '^TestRealCursorWave4ExperimentalReadinessReview$' -v ./internal/adapters/cursor
+```
+
+Its final current-tree verdict is PASS with no findings and no open P0/P1:
+[`2026-08-11-wave4-experimental-readiness-review.md`](../../docs/reviews/2026-08-11-wave4-experimental-readiness-review.md).
+
 The Claude Code Adapter is implemented in `internal/adapters/claude/`. Its
 Wave 3 path is read-only `plan` mode with explicit workspace authorization,
 strict MCP configuration, stream-json session/final/terminal evidence, and
@@ -124,7 +137,24 @@ The current four-path real smoke index is
 current real results from historical Native evidence and remains independent
 from the later `experimental` acceptance record.
 
-The initial parser/artifact benchmark is recorded in
+The initial parser/artifact benchmark is retained as the historical
 [`W4-benchmark-baseline.md`](evidence/2026-08-10/W4-benchmark-baseline.md).
+The complete seven-dimension benchmark, including fresh-process startup,
+working/peak set, parallel actor isolation, cancellation, event append and
+snapshot replace, is recorded in
+[`W4-benchmark-complete.md`](evidence/2026-08-11/W4-benchmark-complete.md).
+
+The selected 2026-08-11 Wave 4 follow-up is recorded in
+[`W4-selected-follow-up.md`](evidence/2026-08-11/W4-selected-follow-up.md) and
+the corresponding review note is
+[`2026-08-11-wave4-selected-follow-up.md`](../../docs/reviews/2026-08-11-wave4-selected-follow-up.md).
+It covers Windows process/artifact recovery, shared Cursor/Claude/Codex
+delivery and contamination conformance, policy/Goal/revision/secret filtering
+boundaries, and the complete benchmark. Race-enabled verification remains an
+optional Windows toolchain supplement because the repository does not depend
+on CGO. The final independent review passed, and the user subsequently accepted
+the four controlled read-only paths as `experimental`. The canonical decision
+is [`W4-experimental-acceptance.md`](evidence/2026-08-11/W4-experimental-acceptance.md);
+it does not promote configuration or start Wave 5.
 
 Wave evidence belongs under `tests/orchestration/evidence/<YYYY-MM-DD>/W*-*`. Do not store credentials, authentication headers, complete environment variables, or private user prompts in evidence.

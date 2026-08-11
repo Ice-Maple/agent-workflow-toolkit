@@ -241,6 +241,44 @@ func TestWave4PolicyMatrixFailsClosed(t *testing.T) {
 	}
 }
 
+func TestWave4PolicyMatrixRejectsRoleAdapterReasoningAndWorkspaceConfusion(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	task, err := orchestration.NewTask("policy-confusion", "review", workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := orchestration.Binding{Role: "reviewer", Adapter: "cursor", Model: "fixture", Reasoning: "none", Permission: "read-only", Workspace: workspace}
+	cases := []struct {
+		name   string
+		mutate func(*orchestration.Binding)
+		code   string
+	}{
+		{name: "role mismatch", mutate: func(binding *orchestration.Binding) { binding.Role = "worker" }, code: "binding_not_registered"},
+		{name: "adapter mismatch", mutate: func(binding *orchestration.Binding) { binding.Adapter = "claude" }, code: "binding_not_registered"},
+		{name: "reasoning mismatch", mutate: func(binding *orchestration.Binding) { binding.Reasoning = "high" }, code: "binding_not_registered"},
+		{name: "permission expansion", mutate: func(binding *orchestration.Binding) { binding.Permission = "workspace-write" }, code: "binding_not_registered"},
+		{name: "workspace mismatch", mutate: func(binding *orchestration.Binding) {
+			binding.Workspace = filepath.Join(t.TempDir(), "other")
+			if err := os.Mkdir(binding.Workspace, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, code: "workspace_mismatch"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			candidate := registered
+			testCase.mutate(&candidate)
+			decision := (Config{RegisteredBindings: []orchestration.Binding{registered}}).Preflight(task, candidate)
+			if decision.Status != "blocked" || decision.Code != testCase.code {
+				t.Fatalf("decision = %#v", decision)
+			}
+		})
+	}
+}
+
 func TestRetryPolicyRejectsWrongEvidenceAndAllowsOnlyRegisteredBranches(t *testing.T) {
 	config := DefaultConfig()
 	preStart := orchestration.Attempt{Status: orchestration.AttemptFailed, ExecutionStarted: false, SideEffectState: "none"}

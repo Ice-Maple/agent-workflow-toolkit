@@ -271,6 +271,35 @@ func TestLaunchDeliveryMissingAndStartupTimeout(t *testing.T) {
 	}
 }
 
+func TestDeliveryMissingRecoversWithSameThreadDeliveryFollowUp(t *testing.T) {
+	workspace := t.TempDir()
+	adapter := New(os.Args[0])
+	adapter.Environment = []string{"CODEX_ADAPTER_HELPER=1", "CODEX_ADAPTER_HELPER_MODE=tool-only"}
+	adapter.StartupTimeout = 2 * time.Second
+	request := LaunchRequest{Workspace: workspace, Model: "fixture-model", Permission: "read-only", TrustAuthorized: true, OutputLastMessagePath: filepath.Join(workspace, "first-last-message.txt"), Prompt: "return the first delivery", TaskCanary: "canary-delivery-recovery"}
+	running, err := adapter.Launch(t.Context(), request)
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	first := waitForCodexTerminal(t, adapter, running.ProviderHandle)
+	if first.Status != "failed" || first.Reason != "delivery_missing" || first.ProviderSessionID == "" {
+		t.Fatalf("initial delivery-missing result = %#v", first)
+	}
+
+	adapter.Environment = []string{"CODEX_ADAPTER_HELPER=1"}
+	followUp, err := adapter.Send(t.Context(), SendRequest{HandleID: running.ProviderHandle, ActionID: "delivery-recovery-send", Prompt: "return the missing final delivery", CoreAuthorized: true, TaskCanary: request.TaskCanary})
+	if err != nil {
+		t.Fatalf("delivery recovery Send() error = %v", err)
+	}
+	terminal := waitForCodexTerminal(t, adapter, followUp.ProviderHandle)
+	if terminal.Status != "completed" || terminal.Reason != "terminal_and_final_delivery" || terminal.ProviderSessionID != first.ProviderSessionID || terminal.FinalText != "ADAPTER_SMOKE_OK" || terminal.FinalSource != "durable_last_message" {
+		t.Fatalf("delivery recovery terminal = %#v", terminal)
+	}
+	if err := adapter.Cleanup(CleanupRequest{HandleID: running.ProviderHandle}); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+}
+
 func TestSendReleasesActionIDWhenProcessStartFails(t *testing.T) {
 	workspace := t.TempDir()
 	adapter := New(os.Args[0])

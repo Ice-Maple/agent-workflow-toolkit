@@ -514,6 +514,67 @@ func TestGoalAuthorityAndAuthorityReferenceAreValidated(t *testing.T) {
 	}
 }
 
+func TestGoalAuthorityCannotCrossRevisionBoundary(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.New(filepath.Join(root, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := policy.DefaultConfig()
+	config.GoalEnabled = true
+	core, err := New(store, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := core.CreateTask(CreateTaskInput{Objective: "goal revision boundary", Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal, err := core.EnableGoalMode(GoalInput{TaskID: task.Task.ID, Scope: []string{"review"}, UserEvidence: "user-input:goal-revision"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Load(task.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := state.Nodes[node.Node.ID]
+	current.Status = orchestration.NodeAwaitingHumanDecision
+	state.Nodes[current.ID] = current
+	if err := store.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := core.RecordHumanDecision(HumanDecisionInput{
+		NodeID: node.Node.ID, Decision: "request_revision", AuthorityRef: "user-input:revision", Instruction: "tighten the review scope",
+	})
+	if err != nil || revision.NewNode == nil {
+		t.Fatalf("revision request = %#v, err=%v", revision, err)
+	}
+	state, err = store.Load(task.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newNode := state.Nodes[revision.NewNode.ID]
+	newNode.Status = orchestration.NodeAwaitingHumanDecision
+	state.Nodes[newNode.ID] = newNode
+	if err := store.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.RecordHumanDecision(HumanDecisionInput{NodeID: newNode.ID, Decision: "approve", AuthorityRef: "goal:" + goal.Authorization.ID}); err == nil {
+		t.Fatal("old-revision Goal authority crossed into the new revision")
+	} else if gatewayErr, ok := err.(*Error); !ok || gatewayErr.Code != "invalid_goal_authority" {
+		t.Fatalf("cross-revision Goal authority error = %v", err)
+	}
+}
+
 func preparedAttemptForTest(t *testing.T) (*Gateway, *storage.Store, LaunchDecision) {
 	return preparedAttemptForTestWithOutput(t, orchestration.ExpectedOutput{})
 }

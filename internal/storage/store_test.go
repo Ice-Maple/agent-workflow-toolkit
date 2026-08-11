@@ -68,6 +68,10 @@ func TestStorageFiltersSecretsFromEventsAndReceipts(t *testing.T) {
 	}
 	task.CurrentRevisionID = revision.ID
 	state := NewState(task, revision)
+	state.GoalAuthorizations["goal-authority-1"] = orchestration.GoalAuthorization{
+		ID: "goal-authority-1", TaskID: task.ID, RevisionID: revision.ID,
+		Scope: []string{"review"}, UserEvidence: "do-not-persist-this-goal-evidence", Active: true,
+	}
 	event := orchestration.NewEvent(task.ID, "diagnostic", map[string]any{
 		"api_token":     "do-not-persist-this-token",
 		"Authorization": "Bearer do-not-persist-this-header",
@@ -102,6 +106,12 @@ func TestStorageFiltersSecretsFromEventsAndReceipts(t *testing.T) {
 		if !strings.Contains(text, "[REDACTED]") {
 			t.Fatalf("%s did not contain a redaction marker: %s", name, text)
 		}
+	}
+	if !strings.Contains(string(snapshotRaw), `"user_authorization_evidence": "[REDACTED]"`) {
+		t.Fatalf("snapshot did not redact Goal authorization evidence: %s", snapshotRaw)
+	}
+	if !strings.Contains(string(snapshotRaw), `"goal_authority_id": "goal-authority-1"`) {
+		t.Fatalf("snapshot redacted the non-secret Goal authority identity: %s", snapshotRaw)
 	}
 }
 

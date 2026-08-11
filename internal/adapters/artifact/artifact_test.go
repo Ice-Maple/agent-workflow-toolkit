@@ -1,8 +1,10 @@
 package artifact
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -84,5 +86,42 @@ func TestStageRemovesStalePreviousAfterSuccessfulReplacement(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".previous"); !os.IsNotExist(err) {
 		t.Fatalf("stale previous artifact remains, err=%v", err)
+	}
+}
+
+func TestStageRecoversAfterInjectedAtomicReplaceInterruption(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the injected backup/install window models Windows replacement semantics")
+	}
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "review.md")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := atomicReplaceWithHook(path, []byte("new"), func(step string) error {
+		if step == "after_backup" {
+			return errors.New("injected interruption")
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "interrupted after backup") {
+		t.Fatalf("injected interruption error = %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("destination survived interrupted replacement: err=%v", err)
+	}
+	if raw, readErr := os.ReadFile(path + ".previous"); readErr != nil || string(raw) != "old" {
+		t.Fatalf("backup after interruption = %q, err=%v", raw, readErr)
+	}
+
+	if _, err := Stage(workspace, path, "markdown", "recovered", nil); err != nil {
+		t.Fatalf("Stage() recovery error = %v", err)
+	}
+	if raw, readErr := os.ReadFile(path); readErr != nil || string(raw) != "recovered" {
+		t.Fatalf("recovered artifact = %q, err=%v", raw, readErr)
+	}
+	if _, err := os.Stat(path + ".previous"); !os.IsNotExist(err) {
+		t.Fatalf("previous artifact remained after recovery, err=%v", err)
 	}
 }

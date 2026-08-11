@@ -1,6 +1,6 @@
 # Agent Workflow Toolkit
 
-面向 Agent 工作方式、能力扩展和工程实践的通用工具仓库。当前已完成多 Agent 协同 MVP 的 Wave 0–3，正在推进 Wave 4 跨 Adapter 硬化与 `experimental` 验收。
+面向 Agent 工作方式、能力扩展和工程实践的通用工具仓库。多 Agent 协同 MVP 的 Wave 0–4 已完成，四条受控只读执行路径已验收为 `experimental`；Wave 5 尚未启动。
 
 ## 仓库定位
 
@@ -68,4 +68,4 @@ SQLite、看板、daemon、tmux、完整 mailbox、OpenCode/Kilo 和复杂恢复
 - [oh-my-openagent 研究](docs/research/2026-08-06-oh-my-openagent-multi-agent-study.md)
 - [Claude Codex Bridge 研究](docs/research/2026-08-06-claude-codex-bridge-multi-agent-study.md)
 
-当前多 Agent 运行时已覆盖 Codex App Native、Cursor Agent、Claude Code 和 Codex CLI 的受控只读路径；下一步以跨 Adapter replay/conformance、Windows 稳定性、安全策略和完整 smoke matrix 为主，不在本阶段扩展 SQLite、daemon、dashboard 或领域业务规则。
+当前多 Agent 运行时已覆盖 Codex App Native、Cursor Agent、Claude Code 和 Codex CLI 的受控只读路径，并已完成跨 Adapter replay/conformance、Windows 稳定性、安全策略、完整 smoke/benchmark 与人工 `experimental` 验收。后续只有在另行授权后才进入 Wave 5 领域试点；当前不扩展 SQLite、daemon、dashboard 或领域业务规则。
