@@ -58,12 +58,15 @@ SQLite、看板、daemon、tmux、完整 mailbox、OpenCode/Kilo 和复杂恢复
 ## 使用入口
 
 - [功能入口清单](docs/guides/agent-capabilities.md)
+- [多 Agent 协同框架架构说明](docs/architecture/multi-agent-orchestration-architecture.md)
+- [多 Agent 协同框架项目接入与使用指南](docs/guides/multi-agent-orchestration-project-adoption.md)
 
 ## 设计资料
 
 - [仓库定位、需求与首个 milestone](docs/brainstorms/2026-08-07-agent-workflow-toolkit.md)
 - [通用 Agent 能力独立建仓决策](docs/decisions/0001-repository-boundary.md)
 - [多 Agent Workflow 总研究与初步设计](docs/research/2026-08-06-multi-agent-workflow-research-and-initial-design.md)
+- [多 Agent 协同框架架构说明](docs/architecture/multi-agent-orchestration-architecture.md)
 - [CCG Workflow 研究](docs/research/2026-08-06-ccg-workflow-multi-agent-study.md)
 - [oh-my-openagent 研究](docs/research/2026-08-06-oh-my-openagent-multi-agent-study.md)
 - [Claude Codex Bridge 研究](docs/research/2026-08-06-claude-codex-bridge-multi-agent-study.md)

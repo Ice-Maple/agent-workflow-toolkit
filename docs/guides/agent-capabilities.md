@@ -17,6 +17,8 @@
 | 接入 Cursor Agent 外部 Adapter | Go Adapter | [`internal/adapters/cursor/cursor.go`](../../internal/adapters/cursor/cursor.go) | 受控只读 Windows 路径已随 Wave 4 验收为 `experimental` |
 | 接入 Claude Code 外部 Adapter | Go Adapter | [`internal/adapters/claude/claude.go`](../../internal/adapters/claude/claude.go) | 受控只读路径已随 Wave 4 验收为 `experimental` |
 | 接入 Codex CLI 外部 Adapter | Go Adapter | [`internal/adapters/codexcli/codex.go`](../../internal/adapters/codexcli/codex.go) | 受控只读路径已随 Wave 4 验收为 `experimental` |
+| 了解多 Agent 协同框架的实际架构 | Architecture | [`docs/architecture/multi-agent-orchestration-architecture.md`](../architecture/multi-agent-orchestration-architecture.md) | Wave 0–4 当前实现与边界的主说明 |
+| 在具体项目中接入多 Agent 协同框架 | Guide | [`docs/guides/multi-agent-orchestration-project-adoption.md`](multi-agent-orchestration-project-adoption.md) | 当前 `experimental` 只读路径的最小落地指南 |
 | 了解多 Agent MVP 的整体设计和 Wave | 设计/计划 | [`docs/plans/2026-08-07-multi-agent-orchestration-mvp-waves.md`](../plans/2026-08-07-multi-agent-orchestration-mvp-waves.md) | 计划与实现并行演进，不是直接运行入口 |
 
 ## 各功能的实际入口
@@ -75,6 +77,8 @@ SubagentStop    → subagent_stop.py
 - 共享协议实现：`internal/protocol/v1/`
 - Adapter 实现：`internal/adapters/`
 - 测试与运行说明：[`tests/orchestration/README.md`](../../tests/orchestration/README.md)
+- 当前架构主文档：[`docs/architecture/multi-agent-orchestration-architecture.md`](../architecture/multi-agent-orchestration-architecture.md)
+- 项目接入指南：[`docs/guides/multi-agent-orchestration-project-adoption.md`](multi-agent-orchestration-project-adoption.md)
 - 设计与计划：[`docs/brainstorms/2026-08-07-multi-agent-orchestration-mvp.md`](../brainstorms/2026-08-07-multi-agent-orchestration-mvp.md) 和 [`docs/plans/2026-08-07-multi-agent-orchestration-mvp-waves.md`](../plans/2026-08-07-multi-agent-orchestration-mvp-waves.md)
 
 `skills/multi-agent-orchestration/` Controller Skill 已完成真实 Codex App Native smoke、artifact 校验和人工批准，
