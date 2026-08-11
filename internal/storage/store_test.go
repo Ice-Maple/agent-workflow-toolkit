@@ -2,13 +2,84 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"agent-workflow-toolkit/internal/orchestration"
 )
+
+func TestRootLockSerializesStateDirectoryAndReleasesCleanly(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	first, err := AcquireRootLock(root, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := AcquireRootLock(root, 50*time.Millisecond); !errors.Is(err, ErrStateDirBusy) {
+		if second != nil {
+			_ = second.Release()
+		}
+		t.Fatalf("second lock error = %v, want ErrStateDirBusy", err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	third, err := AcquireRootLock(root, time.Second)
+	if err != nil {
+		t.Fatalf("lock was not released: %v", err)
+	}
+	if err := third.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStateSchemaVersionIsRequiredAndUnknownVersionsFailClosed(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(filepath.Join(root, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := orchestration.NewTask("schema", "version state", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := orchestration.NewRevision(task.ID, "", task.Objective)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.CurrentRevisionID = revision.ID
+	state := NewState(task, revision)
+	if err := store.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	if state.SchemaVersion != CurrentSchemaVersion || state.ProtocolVersion != CurrentProtocolVersion || state.WriterVersion == "" {
+		t.Fatalf("new state metadata = %#v", state)
+	}
+
+	snapshotPath := filepath.Join(root, "state", "tasks", task.ID, "snapshot.json")
+	raw, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot["schema_version"] = float64(CurrentSchemaVersion + 1)
+	raw, err = json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(snapshotPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(task.ID); err == nil || !strings.Contains(err.Error(), "unsupported storage schema") {
+		t.Fatalf("unknown schema load error = %v", err)
+	}
+}
 
 func TestSnapshotAndAppendOnlyEventReplay(t *testing.T) {
 	root := t.TempDir()

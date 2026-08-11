@@ -15,13 +15,28 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
+	"time"
 
 	"agent-workflow-toolkit/internal/orchestration"
 )
 
+const (
+	CurrentSchemaVersion   = 1
+	CurrentProtocolVersion = 1
+
+	RequestPending        = "pending"
+	RequestCompleted      = "completed"
+	RequestFailed         = "failed"
+	RequestOutcomeUnknown = "outcome_unknown"
+)
+
 type State struct {
+	SchemaVersion      int                                         `json:"schema_version"`
+	ProtocolVersion    int                                         `json:"protocol_version"`
+	WriterVersion      string                                      `json:"writer_version"`
 	Task               orchestration.Task                          `json:"task"`
 	Revisions          map[string]orchestration.TaskRevision       `json:"revisions"`
 	Nodes              map[string]orchestration.WorkflowNode       `json:"nodes"`
@@ -33,11 +48,20 @@ type State struct {
 	Events             []orchestration.Event                       `json:"events"`
 }
 
+type RequestFailure struct {
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
+}
+
 type RequestReceipt struct {
 	RequestID   string          `json:"request_id"`
 	Operation   string          `json:"operation"`
 	PayloadHash string          `json:"payload_hash"`
-	Payload     json.RawMessage `json:"payload"`
+	Status      string          `json:"status"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
+	Failure     *RequestFailure `json:"failure,omitempty"`
+	UpdatedAt   time.Time       `json:"updated_at"`
 }
 
 type Store struct {
@@ -69,6 +93,9 @@ func (s *Store) Root() string { return s.root }
 
 func NewState(task orchestration.Task, revision orchestration.TaskRevision) State {
 	return State{
+		SchemaVersion:      CurrentSchemaVersion,
+		ProtocolVersion:    CurrentProtocolVersion,
+		WriterVersion:      currentWriterVersion(),
 		Task:               task,
 		Revisions:          map[string]orchestration.TaskRevision{revision.ID: revision},
 		Nodes:              map[string]orchestration.WorkflowNode{},
@@ -88,6 +115,9 @@ func (s *Store) Save(state State) error {
 }
 
 func (s *Store) saveUnlocked(state State) error {
+	if err := validateStateVersion(state); err != nil {
+		return err
+	}
 	if strings.TrimSpace(state.Task.ID) == "" {
 		return errors.New("task id is required")
 	}
@@ -152,6 +182,9 @@ func (s *Store) loadUnlocked(taskID string) (State, error) {
 	var state State
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return State{}, fmt.Errorf("decode task %q: %w", taskID, err)
+	}
+	if err := validateStateVersion(state); err != nil {
+		return State{}, fmt.Errorf("load task %q: %w", taskID, err)
 	}
 	if err := s.reconcileEventsUnlocked(&state); err != nil {
 		return State{}, fmt.Errorf("reconcile task %q events: %w", taskID, err)
@@ -290,11 +323,20 @@ func (s *Store) LoadReceipt(requestID string) (RequestReceipt, bool, error) {
 	if err := json.Unmarshal(raw, &receipt); err != nil {
 		return RequestReceipt{}, false, fmt.Errorf("decode request receipt: %w", err)
 	}
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, receipt.Payload); err != nil {
-		return RequestReceipt{}, false, fmt.Errorf("normalize request receipt payload: %w", err)
+	if receipt.Status == "" && len(receipt.Payload) > 0 {
+		// Receipts written before request journaling were completed outcomes.
+		receipt.Status = RequestCompleted
 	}
-	receipt.Payload = compact.Bytes()
+	if err := validateReceipt(receipt); err != nil {
+		return RequestReceipt{}, false, fmt.Errorf("validate request receipt: %w", err)
+	}
+	if len(receipt.Payload) > 0 {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, receipt.Payload); err != nil {
+			return RequestReceipt{}, false, fmt.Errorf("normalize request receipt payload: %w", err)
+		}
+		receipt.Payload = compact.Bytes()
+	}
 	return receipt, true, nil
 }
 
@@ -304,20 +346,98 @@ func (s *Store) SaveReceipt(receipt RequestReceipt) error {
 	if strings.TrimSpace(receipt.RequestID) == "" || strings.TrimSpace(receipt.Operation) == "" {
 		return errors.New("request id and operation are required")
 	}
-	if len(receipt.Payload) == 0 {
-		return errors.New("request receipt payload is required")
+	if receipt.Status == "" && len(receipt.Payload) > 0 {
+		receipt.Status = RequestCompleted
 	}
-	sanitized, err := sanitizeJSON(receipt.Payload)
-	if err != nil {
-		return fmt.Errorf("sanitize request receipt payload: %w", err)
+	if receipt.UpdatedAt.IsZero() {
+		receipt.UpdatedAt = time.Now().UTC()
 	}
-	receipt.Payload = sanitized
+	if err := validateReceipt(receipt); err != nil {
+		return err
+	}
+	if len(receipt.Payload) > 0 {
+		sanitized, err := sanitizeJSON(receipt.Payload)
+		if err != nil {
+			return fmt.Errorf("sanitize request receipt payload: %w", err)
+		}
+		receipt.Payload = sanitized
+	}
+	if receipt.Failure != nil {
+		receipt.Failure.Details = sanitizeMap(receipt.Failure.Details)
+	}
 	raw, err := json.MarshalIndent(receipt, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal request receipt: %w", err)
 	}
 	path := filepath.Join(s.root, "requests", hashKey(receipt.RequestID)+".json")
 	return atomicReplace(path, raw, 0o600)
+}
+
+func validateReceipt(receipt RequestReceipt) error {
+	if strings.TrimSpace(receipt.RequestID) == "" || strings.TrimSpace(receipt.Operation) == "" || strings.TrimSpace(receipt.PayloadHash) == "" {
+		return errors.New("request id, operation and payload hash are required")
+	}
+	switch receipt.Status {
+	case RequestPending, RequestOutcomeUnknown:
+		if len(receipt.Payload) > 0 || receipt.Failure != nil {
+			return fmt.Errorf("request receipt status %q cannot contain an outcome", receipt.Status)
+		}
+	case RequestCompleted:
+		if len(receipt.Payload) == 0 || receipt.Failure != nil {
+			return errors.New("completed request receipt requires payload only")
+		}
+		if !json.Valid(receipt.Payload) {
+			return errors.New("completed request receipt payload is invalid JSON")
+		}
+	case RequestFailed:
+		if receipt.Failure == nil || strings.TrimSpace(receipt.Failure.Code) == "" || len(receipt.Payload) > 0 {
+			return errors.New("failed request receipt requires failure only")
+		}
+	default:
+		return fmt.Errorf("unsupported request receipt status %q", receipt.Status)
+	}
+	return nil
+}
+
+func validateStateVersion(state State) error {
+	if state.SchemaVersion != CurrentSchemaVersion {
+		return fmt.Errorf("unsupported storage schema %d; expected %d and use a version-specific state-dir", state.SchemaVersion, CurrentSchemaVersion)
+	}
+	if state.ProtocolVersion != CurrentProtocolVersion {
+		return fmt.Errorf("unsupported state protocol %d; expected %d", state.ProtocolVersion, CurrentProtocolVersion)
+	}
+	if strings.TrimSpace(state.WriterVersion) == "" {
+		return errors.New("state writer_version is required")
+	}
+	return nil
+}
+
+func currentWriterVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "agent-workflow-toolkit/devel"
+	}
+	version := strings.TrimSpace(info.Main.Version)
+	if version == "" || version == "(devel)" {
+		version = "devel"
+	}
+	revision := ""
+	dirty := false
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			dirty = setting.Value == "true"
+		}
+	}
+	if revision != "" {
+		version += "+" + revision
+	}
+	if dirty {
+		version += ".dirty"
+	}
+	return "agent-workflow-toolkit/" + version
 }
 
 func (s *Store) taskDir(taskID string) string {

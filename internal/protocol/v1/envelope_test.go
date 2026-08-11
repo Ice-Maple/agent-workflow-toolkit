@@ -1,10 +1,48 @@
 package v1
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestRuntimeOperationsMatchPublishedRequestSchema(t *testing.T) {
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	schemaPath := filepath.Join(filepath.Dir(source), "..", "..", "..", "protocol", "v1", "request.schema.json")
+	raw, err := os.ReadFile(schemaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties struct {
+			Operation struct {
+				Enum []string `json:"enum"`
+			} `json:"operation"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	published := make(map[string]struct{}, len(schema.Properties.Operation.Enum))
+	for _, operation := range schema.Properties.Operation.Enum {
+		published[operation] = struct{}{}
+	}
+	if len(published) != len(operations) {
+		t.Fatalf("schema operations=%v runtime operations=%v", published, operations)
+	}
+	for operation := range operations {
+		if _, ok := published[operation]; !ok {
+			t.Fatalf("runtime operation %q is absent from request schema", operation)
+		}
+	}
+}
 
 func TestDecodeRequestAcceptsValidEnvelope(t *testing.T) {
 	req, err := DecodeRequest(strings.NewReader(`{"protocol_version":1,"request_id":"req-1","operation":"runPreflight","payload":{"node_id":"node-1"}}`))

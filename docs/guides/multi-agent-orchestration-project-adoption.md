@@ -28,7 +28,7 @@
 
 | 路径 | 推荐度 | 适用条件 | 当前接入方式 |
 | --- | --- | --- | --- |
-| Codex App Native | 首轮推荐 | 已在 Codex App 中工作，希望用原生 subagent 做只读 explorer/reviewer | Controller 加载仓库 Skill，通过 Gateway 签发/回填 Native action |
+| Codex App Native | 首轮推荐 | 已在 Codex App 中工作，希望用原生 subagent 做只读 explorer/reviewer | 将 pinned Skill 安装到消费仓库 `.agents/skills`，通过 Gateway 签发/回填 Native action |
 | Cursor Agent | 条件可用 | 已安装并登录 Cursor Agent；任务不需要 MCP allowlist | 需要 toolkit-side host-action bridge；Adapter 本身已通过真实 smoke |
 | Claude Code | 条件可用 | 已安装并登录 Claude Code；MCP 配置可严格或配置隔离 | 需要 toolkit-side host-action bridge |
 | Codex CLI | 条件可用 | 已安装并登录 Codex CLI；provider route、sandbox 和 approval 可显式配置 | 需要 toolkit-side host-action bridge |
@@ -42,9 +42,11 @@
 ```text
 E:\tools\agent-workflow-toolkit\          # 固定版本的通用框架
 E:\projects\sample-project\              # 具体项目
-  └─ reports\agent-review.md              # 显式交付物，可按项目规则决定是否提交
+  ├─ .agents\skills\multi-agent-orchestration\ # 已安装的 Controller Skill
+  ├─ .agents\agent-workflow-toolkit.lock.json   # core/Skill 来源 receipt
+  └─ reports\agent-review.md                    # 显式交付物，可按项目规则决定是否提交
 
-%LOCALAPPDATA%\agent-workflow-toolkit\sample-project\
+%LOCALAPPDATA%\agent-workflow-toolkit\sample-project\core-0.2.0-p1-<commit>\
   ├─ policy.local.json                     # 本机 binding；不含凭据
   └─ state\                                # snapshot / events / receipts
 ```
@@ -57,20 +59,58 @@ E:\projects\sample-project\              # 具体项目
 | 项目目标、角色语义、Prompt、required sections、业务验收 | 具体项目 |
 | provider token/登录态 | CLI/宿主自己的凭据存储，不进入任何项目文件 |
 | Gateway runtime state | 用户级或项目外 `state-dir` |
+| Controller Skill 与来源 receipt | 消费仓库 `.agents/`；是否提交由项目治理决定 |
 | 最终报告/artifact | Task workspace 内的显式绝对路径 |
 
-## 4. 固定版本并构建核心
+## 4. 固定、构建并安装同一版本
 
-在 toolkit checkout 中固定一个已经验收的 commit 或 release。当前 Wave 4 acceptance 基线是 `130a901`：
+不要继续固定早于本指南修复的 Wave 4 基线 `130a901`。应选择包含 adoption hardening 的已提交 commit 或 release，并从干净 checkout 构建：
 
 ```powershell
-Set-Location E:\tools\agent-workflow-toolkit
-git checkout 130a901
-go build -o .\bin\agent-workflow-core.exe .\cmd\agent-workflow-core
-.\bin\agent-workflow-core.exe --version
+$PinnedCommit = '<adoption-hardening-commit>'
+$ToolkitRoot = 'E:\tools\agent-workflow-toolkit'
+$ConsumerRoot = 'E:\projects\sample-project'
+$CoreInstallRoot = Join-Path $env:LOCALAPPDATA "agent-workflow-toolkit\dist\$PinnedCommit"
+$Core = Join-Path $CoreInstallRoot 'agent-workflow-core.exe'
+
+Set-Location $ToolkitRoot
+git checkout --detach $PinnedCommit
+if (git status --porcelain=v1) { throw 'toolkit checkout must be clean' }
+go test -count=1 ./...
+New-Item -ItemType Directory -Force -Path $CoreInstallRoot | Out-Null
+go build -o $Core .\cmd\agent-workflow-core
+& $Core --version
+go version -m $Core
 ```
 
-项目升级 toolkit 版本时，重新运行该版本的测试/真实 smoke，并把升级决定记录在项目侧；不要让多个未固定 checkout 共享同一个 state-dir。
+`--version` 必须显示 `version=0.2.0 protocol=1 maturity=experimental revision=<PinnedCommit> dirty=false`；`revision=unknown`、commit 不同或 dirty 状态不符都不能安装为固定版本。
+
+随后将同一 checkout 的 Controller Skill 安装到消费仓库。`Copy` 是最低权限路径；确认本机支持 symlink 时也可改用 `SymbolicLink`：
+
+```powershell
+$Installer = Join-Path $ToolkitRoot 'tools\orchestration\install_controller_skill.ps1'
+& $Installer `
+  -ToolkitRoot $ToolkitRoot `
+  -ConsumerRoot $ConsumerRoot `
+  -CorePath $Core `
+  -Mode Copy
+
+& $Installer `
+  -ToolkitRoot $ToolkitRoot `
+  -ConsumerRoot $ConsumerRoot `
+  -CorePath $Core `
+  -Check
+```
+
+安装器生成：
+
+- `$ConsumerRoot\.agents\skills\multi-agent-orchestration\`；
+- `$ConsumerRoot\.agents\agent-workflow-toolkit.lock.json`；
+- toolkit commit/dirty、core canonical path/SHA-256/version/protocol/maturity/revision/dirty、Skill source/target/tree hash 和安装模式。
+
+binary 必须构建到 checkout 外；如果把 `bin/` 之类未忽略目录写进 toolkit，安装器会按设计把 checkout 判为 dirty 并拒绝 receipt。安装器还会拒绝未知 VCS revision、core 与 checkout revision/dirty 不一致、已有目标和已有 receipt；`-AllowDirty` 仅供 toolkit 自身开发 smoke，不是消费项目接入方式。每次开始 Gateway Workflow 前先运行 `-Check`。安装或升级 Skill 后新建 Codex 任务，让宿主从消费仓库 `.agents/skills` 重新发现 Skill；不要静默使用全局旧副本。
+
+项目升级时先归档旧 receipt 和 evidence，使用新的 version-specific state-dir，再构建、重装、`-Check` 和 smoke。当前没有 state migration：不要让新 binary 写旧 state-dir，也不要让多个 checkout 共享同一个 state-dir。
 
 ## 5. 准备本机 policy
 
@@ -100,9 +140,10 @@ Gateway 默认没有 registered binding，不提供“随便派发”的隐式�
 注意：
 
 - `workspace` 是本机 absolute canonical path，因此这个 policy 通常不直接提交；
-- `role/adapter/model/reasoning/permission/workspace/MCP allowlist` 必须和请求完全匹配；
+- node `role` 必须非空，并与 binding `role` 完全一致；`role/adapter/model/reasoning/permission/workspace/MCP allowlist` 必须和请求完全匹配；
 - 首轮保持 `read-only`、`goal_enabled=false` 和空 MCP allowlist；
-- policy 只记录声明，不保存 API key、token、header 或 provider base URL 中的凭据。
+- policy 只记录声明，不保存 API key、token、header 或 provider base URL 中的凭据；
+- policy loader 对顶层和 nested binding 使用 strict JSON：未知字段、拼错字段和 trailing JSON 都会拒绝，不会静默落到默认值。
 
 外部 Adapter 的标识分别是 `cursor`、`claude`、`codexcli`。切换 Adapter 时必须新增完整 binding，并先单独通过对应 Adapter 的 capability preflight；不要只改一个字符串后沿用旧批准。
 
@@ -117,27 +158,34 @@ Gateway 默认没有 registered binding，不提供“随便派发”的隐式�
 - 新的 `request_id`；
 - 上一步 response 中返回的真实 task/node/attempt/action ID。
 
-相同 request ID 加相同内容可以安全重放；相同 ID 加不同内容会返回 `request_id_reused`。Gateway 的业务错误也会以 `ok=false` 的结构化 response 返回，所以不能只检查进程 exit code。
+one-shot CLI 会对整个 state-dir 获取 OS file lock；同一 state-dir 的请求因此串行，不支持用多个并发 Controller 提升吞吐。锁在进程退出时由 OS 释放，等待超过 `--lock-timeout` 会返回结构化 `state_dir_busy`。
+
+request journal 的重放语义是：`completed` 返回同一 durable payload，确定的 `failed` 返回同一业务错误，相同 ID 加不同内容返回 `request_id_reused`；如果进程在 durable outcome 前中断，`pending/outcome_unknown` 重放会返回 `request_outcome_unknown`，不会再次 dispatch。遇到未知结果时停止自动推进并保留 state/receipt 供人工检查，不要换新 request ID 重做同一意图。
+
+`--validate-request` 只验证 protocol v1 envelope，包括 version、request ID、operation、payload object、unknown envelope field 和 trailing JSON；成功返回 `envelope_valid`。operation-specific payload 字段由 `--gateway` dispatch 严格校验，不能把 envelope valid 当成请求一定可执行。Gateway 的业务错误也会以 `ok=false` 的结构化 response 返回，所以不能只检查进程 exit code。
 
 PowerShell 7 可以使用下面的薄调用函数：
 
 ```powershell
-$Core = 'E:\tools\agent-workflow-toolkit\bin\agent-workflow-core.exe'
-$StateDir = Join-Path $env:LOCALAPPDATA 'agent-workflow-toolkit\sample-project\state'
-$PolicyFile = Join-Path $env:LOCALAPPDATA 'agent-workflow-toolkit\sample-project\policy.local.json'
+$Core = Join-Path $env:LOCALAPPDATA 'agent-workflow-toolkit\dist\<full-commit>\agent-workflow-core.exe'
+$FrameworkId = 'core-0.2.0-p1-<commit12>'
+$RuntimeRoot = Join-Path $env:LOCALAPPDATA "agent-workflow-toolkit\sample-project\$FrameworkId"
+$StateDir = Join-Path $RuntimeRoot 'state'
+$PolicyFile = Join-Path $RuntimeRoot 'policy.local.json'
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
 function Invoke-TaskGateway {
     param([hashtable]$Request)
 
     $json = $Request | ConvertTo-Json -Depth 20 -Compress
-    $raw = $json | & $Core --gateway --state-dir $StateDir --policy-file $PolicyFile
+    $raw = $json | & $Core --gateway --state-dir $StateDir --policy-file $PolicyFile --lock-timeout 5s
     if ($LASTEXITCODE -ne 0) {
         throw "agent-workflow-core process failed: $LASTEXITCODE"
     }
     $response = $raw | ConvertFrom-Json
     if (-not $response.ok) {
-        throw "TaskGateway rejected request: $($response.error.code) - $($response.error.message)"
+        $details = $response.error.details | ConvertTo-Json -Depth 10 -Compress
+        throw "TaskGateway rejected request: $($response.error.code) - $($response.error.message) details=$details"
     }
     return $response.payload
 }
@@ -255,7 +303,17 @@ $batch = Invoke-TaskGateway @{
 
 #### Native 路径
 
-Controller 加载 [`skills/multi-agent-orchestration/SKILL.md`](../../skills/multi-agent-orchestration/SKILL.md)，按 [`native-action-contract.md`](../../skills/multi-agent-orchestration/references/native-action-contract.md) 执行 App 原生 subagent action。没有 pending core action 时禁止启动 subagent。
+Controller 必须从消费仓库加载 `.agents/skills/multi-agent-orchestration/SKILL.md`，并在第一个 Gateway request 前让安装器以 `-Check` 核验 receipt；该副本的上游合同见 [`skills/multi-agent-orchestration/SKILL.md`](../../skills/multi-agent-orchestration/SKILL.md) 和 [`native-action-contract.md`](../../skills/multi-agent-orchestration/references/native-action-contract.md)。没有 pending core action 时禁止启动 subagent。
+
+Gateway v1 公开 HostAction 只有：
+
+| Action | 签发时机 | Lease | 执行者 | 结果 |
+| --- | --- | --- | --- | --- |
+| `launch` | `prepareAttempt` 成功后 | 5 分钟；host 启动后应立即提交 running/terminal result | Native host / Adapter bridge | 绑定 handle、session、identity、canary；terminal=false 时产生 `observe` |
+| `observe` | 已启动且未 terminal | 15 分钟，覆盖真实 reviewer/provider 的同步等待窗口 | 同一 host/session | 提交一次 terminal 或失败 evidence |
+| `cancel_host` | `requestCancel` | 5 分钟 | host/Adapter runner | `cancelled` 或 `cancel_unconfirmed` |
+
+`send` 和 `cleanup` 仅是 Adapter lifecycle primitive，不是 Gateway HostAction；Gateway 不签发也不接受它们。Provider 进程和临时资源由 Native host 或 Adapter runner 在 `finally` 中做幂等 cleanup，不能等待或提交一个 core-signed cleanup result。
 
 #### 外部 CLI 路径
 
@@ -316,6 +374,8 @@ $completion = Invoke-TaskGateway @{
 
 成功后节点仍会进入 `awaiting_human_decision`，不会自动继续。
 
+每个 Attempt 的 completion checkpoint 只记录一次。无论第一次结果是 completed 还是 `delivery_missing`，使用新 request ID 再次调用 `requestCompletion` 都会返回 `completion_already_recorded`；相同 request ID 的网络重放仍由 request journal 返回原 outcome。不得在 checkpoint 后本地补 artifact 并重算同一 Attempt。
+
 ### 6.8 记录人工决定
 
 ```powershell
@@ -325,7 +385,6 @@ $approved = Invoke-TaskGateway @{
     operation = 'recordHumanDecision'
     payload = @{
         node_id = $NodeId
-        attempt_id = $AttemptId
         decision = 'approve'
         authority_ref = 'user-input:approve-sample-review'
     }
@@ -334,13 +393,16 @@ $approved = Invoke-TaskGateway @{
 
 可用决定：
 
-| Decision | 使用时机 |
-| --- | --- |
-| `approve` | 当前完成证据和 artifact 可接受 |
-| `request_revision` | 需求/指令需要修订；必须提供 `instruction` |
-| `retry_node` | 当前失败可安全重试；新 Attempt 必须引用旧 Attempt |
-| `release_contamination` | 用户明确确认污染并允许重新 preflight；必须引用 contaminated Attempt |
-| `abort` | 停止 Task |
+| Decision | `attempt_id` | 其他要求 | 语义 |
+| --- | --- | --- | --- |
+| 普通 `approve` | **禁止携带** | `authority_ref` | 只批准已成功完成且 artifact 合规的当前节点 |
+| fallback `approve` | 必须是当前失败 checkpoint 的 Attempt | `authority_ref` | 只授权后续 `prepareFallbackAttempt`，不会批准节点 |
+| `request_revision` | 不需要 | `instruction`、`authority_ref` | 创建新 revision 和新 node；`delivery_missing` 的支持恢复路径 |
+| `retry_node` | 不需要 | `authority_ref`；后续 retry operation 引用旧的非 completed Attempt | 重新开放可重试的原 node；`delivery_missing` 的 completed Attempt 会返回 `retry_not_allowed` |
+| `release_contamination` | 必须是 unreleased contaminated Attempt | 直接 `user-input:` authority | 确认污染并强制重新 preflight |
+| `abort` | 不需要 | `authority_ref` | 停止 Task |
+
+普通成功 `approve` 如果错误携带成功 Attempt ID，会按 fallback approval 解释并返回 `invalid_fallback_approval`；不得通过删改 core 校验来适配旧示例。
 
 ## 7. 项目侧应该落盘什么
 
@@ -366,11 +428,17 @@ toolkit 固定版本
 | 现象/错误 | 含义 | 正确处理 |
 | --- | --- | --- |
 | `binding_not_registered` | 请求 binding 与 policy 不完全一致 | 修正 policy/request；不要放宽为任意匹配 |
+| `role_required` / `node_role_mismatch` | node role 为空或与 binding role 不同 | 新建/修订明确 role 的 node，使用完全一致的 binding |
 | `workspace_mismatch` | Task 与 binding workspace 不同 | 使用 canonical absolute path，重新 preflight |
 | `mcp_*_unsupported` | Adapter 无法证明 task MCP 隔离 | 清空非必要 allowlist 或更换已验证路径；不要继承全局 MCP |
-| `delivery_missing` | terminal/exit 成功但缺合规正文或 artifact | 等核心签发同 session delivery-only `send`，不要自行续写 |
+| `delivery_missing` | terminal/exit 成功但缺合规正文或 artifact | 停在人工 checkpoint，选择 `request_revision` 或 `abort`；Gateway v1 不签发 `send`，也拒绝会形成死路的 `retry_node` |
+| `delivery_revision_required` | 对 `delivery_missing` 误用了普通 `approve` | 保持 checkpoint，改用 `request_revision` 或 `abort`；不要添加 `attempt_id` 尝试 fallback |
+| `completion_already_recorded` | 当前 Attempt 已形成 completion checkpoint | 不重算同一 Attempt；记录人工决定 |
 | `attempt_in_flight` | 同一节点已有运行 Attempt | observe/cancel 现有 Attempt，不要重复 launch |
 | `action_outcome_unknown` | lease/副作用状态不确定 | 停止自动 retry，进入人工判断 |
+| `state_dir_busy` | 另一个进程持有同一 state-dir OS lock | 等待 owner 退出后重放原 request；不要并发 Controller |
+| `request_outcome_unknown` | request 已开始但 durable outcome 不可安全重放 | 停止并保留 state/receipt 人工检查；不要换 ID 重做同一意图 |
+| `unsupported storage schema` | binary 与 state-dir schema/protocol 不兼容 | 保持旧 evidence 不变，改用该版本的新 state-dir；当前不迁移 |
 | `identity_mismatch` / contaminated | provider/session/workspace/canary 不一致 | 冻结；用户决定 release、revision 或 abort |
 | `checkpoint_required` | 节点正在等待人工决定 | 先调用 `recordHumanDecision` |
 | Codex CLI 401 | 隔离调用忽略用户 config，缺 custom provider route | 显式配置非敏感 route；凭据仍留在宿主环境 |
@@ -394,14 +462,19 @@ Windows `go test -race` 需要额外 CGO/C 编译器工具链；当前项目不�
 
 至少完成：
 
-1. `--version` 和 `--validate-request`；
-2. 临时 state-dir 的 `createTask` CLI smoke；
-3. 目标 workspace 的 core preflight；
-4. 所选 Native/Adapter 的真实只读 smoke；
-5. artifact hash 和 required sections 校验；
-6. 人工 `approve` 检查点；
-7. cleanup 后无孤儿进程和未提交 secret/runtime 文件；
-8. 一次独立 reviewer 对实际 diff、证据和边界的检查。
+1. clean pinned checkout 构建，`--version`/`go version -m` 的 revision 与 commit 一致且 `dirty=false`；
+2. Controller Skill 安装 receipt 创建、`-Check` 通过，并在新 Codex 任务中确认从消费仓库发现；
+3. `--validate-request` 返回 `envelope_valid`，再用临时 version-specific state-dir 跑公共 CLI happy path；
+4. 目标 workspace 的 core preflight，含非空且相等的 node/binding role；
+5. 所选 Native/Adapter 的真实只读 smoke；
+6. artifact hash、required sections 和普通人工 `approve`（不携带 `attempt_id`）通过；
+7. `delivery_missing` 到 `request_revision`、`state_dir_busy` 和相同 request ID 并发/重放行为符合本指南；
+8. host/Adapter runner `finally` cleanup 后无孤儿进程，仓库无 secret/runtime 文件；
+9. 一次独立 reviewer 对实际 diff、公共入口、测试、receipt 和边界的检查。
+
+toolkit 的普通测试已经把这条公开路径固化在 [`cmd/agent-workflow-core/adoption_test.go`](../../cmd/agent-workflow-core/adoption_test.go)：它覆盖 version/envelope、完整 create→propose→preflight→attempt→action→completion→approve、`delivery_missing` revision、8 进程同 request 串行、structured busy error 和 clean consumer Skill 安装/检查。真实 Provider smoke 仍保持 opt-in，不由 fixture 冒充。
+
+本指南对应的完整自动化、真实 Codex App Native smoke 和 Cursor 独立 closure 见 [`AWT-adoption-hardening.md`](../../tests/orchestration/evidence/2026-08-11/AWT-adoption-hardening.md)。
 
 ### 项目上线边界
 
@@ -414,11 +487,12 @@ Windows `go test -race` 需要额外 CGO/C 编译器工具链；当前项目不�
 ```text
 固定 toolkit 版本
   → 构建 agent-workflow-core
-  → 项目外 state-dir + 本机 policy
+  → 安装并核验消费仓库 Controller Skill
+  → version-specific 项目外 state-dir + strict 本机 policy
   → 只读 reviewer Node + Markdown artifact
   → Codex App Native Controller
   → completion evidence
-  → 人工 approve
+  → 普通人工 approve（无 attempt_id）
   → 保存项目侧试用记录
 ```
 

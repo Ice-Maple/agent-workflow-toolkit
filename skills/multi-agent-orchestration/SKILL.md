@@ -15,6 +15,8 @@ This Skill is the Codex App Controller entrypoint for the Wave 2 Native slice. I
 4. Codex App Native uses the App's native subagent capability. Do not shell-launch `codex`, `codex.exe`, or another CLI to simulate the Native path.
 5. Do not use `--force`, `--yolo`, hidden approval, automatic Goal authority, or an unregistered binding to bypass a checkpoint.
 6. If the host cannot provide the required Native capability, report `unsupported` or `degraded` through the core path and stop that execution path. Do not silently switch to an external CLI.
+7. In a consumer repository, require a valid `.agents/agent-workflow-toolkit.lock.json` produced by `tools/orchestration/install_controller_skill.ps1`; run its `-Check` mode before the first Gateway request. Do not silently use another global or copied Skill.
+8. Treat the node role as admission data. The proposed node role and binding role must be the same non-empty configurable string.
 
 ## Controller loop
 
@@ -23,11 +25,13 @@ For each user task:
 1. Preserve the user's objective and Workflow proposal as input. Create a Task, propose explicitly named nodes, and run binding/workspace/MCP preflight.
 2. Prepare an Attempt only after preflight succeeds. Show the core's dispatch prompt exactly, including role, Adapter, model, and Reasoning.
 3. Poll host actions. For each pending action, verify the action ID, Attempt ID, sequence, lease, parameters hash, workspace, and task canary before invoking the Native capability.
-4. Execute only `launch`, `observe`, `send`, `cancel_host`, or `cleanup`. Submit the structured result once with the exact lease. A missing, expired, or unknown outcome is not permission to retry or relaunch.
+4. Execute only the Gateway v1 public actions `launch`, `observe`, or `cancel_host`. Submit the structured result once with the exact lease. `send` and `cleanup` are reserved Adapter lifecycle primitives and are not valid Gateway HostActions.
 5. Preserve the Native task handle, provider/session identity, workspace, and task canary. A mismatch is contamination or incomplete evidence according to the core response; stop and surface the human checkpoint.
 6. Request completion through the core. Required artifacts must exist at the declared canonical path and pass core validation. Empty text, a successful turn event without final text, or tool-only output is not completion evidence.
 7. When the core returns `awaiting_human_decision`, stop. Ask the user for `approve`, `request_revision`, `retry_node`, `abort`, or the specific contamination release decision. Do not infer approval from a successful provider exit.
 8. Only after the core records the human decision may the Controller propose or prepare the next node. Keep all historical Attempts and decisions visible through core responses.
+9. If completion returns `delivery_missing`, do not wait for a `send` action or recompute completion after writing a local artifact: Gateway v1 will not issue one and the checkpoint is immutable. Request `request_revision` or `abort`; a new revision/node is the supported recovery path.
+10. Release provider process/task resources in the host or Adapter runner's `finally` path. Cleanup is not submitted as a Gateway HostActionResult.
 
 ## Native action result contract
 
@@ -43,4 +47,4 @@ createTask → proposeNode → runPreflight → prepareAttempt
   → awaiting_human_decision → user approve
 ```
 
-The Controller must leave the task at the human checkpoint when completion is valid. It must retain the first failed completion evidence if a core-issued delivery-only `send` follow-up is later permitted.
+The Controller must leave the task at the human checkpoint when completion is valid. It must also preserve a failed `delivery_missing` CompletionDecision before asking the user to revise or abort; Gateway v1 does not provide in-place delivery follow-up.

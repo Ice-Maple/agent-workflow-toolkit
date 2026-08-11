@@ -4,9 +4,11 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -308,8 +310,17 @@ func contains(values []string, target string) bool {
 
 func LoadJSON(raw []byte) (Config, error) {
 	config := DefaultConfig()
-	if err := json.Unmarshal(raw, &config); err != nil {
-		return Config{}, err
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
+		return Config{}, fmt.Errorf("decode policy: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return Config{}, errors.New("decode policy: more than one JSON value")
+		}
+		return Config{}, fmt.Errorf("decode policy trailing data: %w", err)
 	}
 	config = WithDefaults(config)
 	if err := config.Validate(); err != nil {

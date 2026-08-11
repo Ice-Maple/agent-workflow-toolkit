@@ -10,7 +10,7 @@ The Controller may execute an action only when `pollHostActions` returns it as p
 {
   "action_id": "action-...",
   "attempt_id": "attempt-...",
-  "kind": "launch | observe | send | cancel_host | cleanup",
+  "kind": "launch | observe | cancel_host",
   "sequence": 1,
   "lease": "lease-...",
   "parameters": {},
@@ -21,6 +21,8 @@ The Controller may execute an action only when `pollHostActions` returns it as p
 ```
 
 The Controller must preserve `action_id`, `attempt_id`, `sequence`, `lease`, and `parameters_hash`. It must not rewrite parameters or manufacture a replacement action after an unknown result.
+
+The current Gateway uses a five-minute lease for launch/cancel control actions and a fifteen-minute lease for observe. Submit the launch result immediately after the Native task starts; an observe call may then wait for the reviewer/provider turn within its longer lease.
 
 ## Structured result
 
@@ -52,4 +54,6 @@ The provider/model/role values remain configurable strings. `codex-native` in th
 - An expired lease becomes `outcome_unknown` and blocks automatic retry/fallback until the core records a human decision.
 - A provider/session/workspace/canary mismatch becomes contaminated or incomplete according to the core; it never silently relaunches.
 - Completion is separate from provider exit, turn success, tool payload, or Agent self-report. Required artifacts are validated by the core.
-- `send` follow-up is permitted only when the core explicitly issues a delivery action for the already verified session.
+- Gateway protocol v1 never issues or accepts `send` or `cleanup` HostActions. They remain reserved Adapter lifecycle primitives.
+- `delivery_missing` reaches an immutable human checkpoint; completion is not recomputed in place. The supported recovery is `request_revision` to create a new revision/node, or `abort`.
+- Provider process/task cleanup belongs to the host or Adapter runner `finally` path and is not submitted to TaskGateway as an action result.

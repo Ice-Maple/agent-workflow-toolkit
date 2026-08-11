@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +97,11 @@ func TestFakeReadOnlyWorkflowReachesHumanCheckpoint(t *testing.T) {
 	if completion.Decision.Status != orchestration.AttemptCompleted || completion.Node.Status != orchestration.NodeAwaitingHumanDecision {
 		t.Fatalf("completion = %#v", completion)
 	}
+	if _, err := core.RecordHumanDecision(HumanDecisionInput{NodeID: nodeResult.Node.ID, AttemptID: launch.Attempt.ID, Decision: "approve", AuthorityRef: "user-input:invalid-attempt-bound-approve"}); err == nil {
+		t.Fatal("successful Attempt was accepted as fallback approval")
+	} else if gatewayErr, ok := err.(*Error); !ok || gatewayErr.Code != "invalid_fallback_approval" {
+		t.Fatalf("successful attempt-bound approval error = %v", err)
+	}
 	approved, err := core.RecordHumanDecision(HumanDecisionInput{NodeID: nodeResult.Node.ID, Decision: "approve", AuthorityRef: "user-input:approve"})
 	if err != nil {
 		t.Fatal(err)
@@ -150,6 +157,125 @@ func TestGatewayRequestIDIsIdempotentAndRejectsChangedPayload(t *testing.T) {
 	}
 	if _, err := core.Handle(changed); err == nil {
 		t.Fatal("changed request payload reused the same request id")
+	}
+}
+
+func TestPendingRequestJournalPreventsDuplicateMutationAfterOutcomeSaveFailure(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	store, err := storage.New(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core, err := New(store, policy.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalSave := core.saveReceipt
+	core.saveReceipt = func(receipt storage.RequestReceipt) error {
+		if receipt.Status == storage.RequestCompleted {
+			return errors.New("injected completed receipt failure")
+		}
+		return originalSave(receipt)
+	}
+	request, err := protocol.NewRequest("journal-create", "createTask", CreateTaskInput{Objective: "journal fault", Workspace: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.Handle(request); err == nil || !strings.Contains(err.Error(), "injected completed receipt failure") {
+		t.Fatalf("first request error = %v", err)
+	}
+	taskDirs, err := os.ReadDir(filepath.Join(stateDir, "tasks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(taskDirs) != 1 {
+		t.Fatalf("task directories after injected failure = %d, want 1", len(taskDirs))
+	}
+
+	recoveredStore, err := storage.New(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := New(recoveredStore, policy.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recovered.Handle(request); err == nil {
+		t.Fatal("outcome-unknown request was dispatched again")
+	} else if gatewayErr, ok := err.(*Error); !ok || gatewayErr.Code != "request_outcome_unknown" {
+		t.Fatalf("replay error = %v", err)
+	}
+	taskDirs, err = os.ReadDir(filepath.Join(stateDir, "tasks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(taskDirs) != 1 {
+		t.Fatalf("replay created duplicate task directories: %d", len(taskDirs))
+	}
+}
+
+func TestWorkflowNodeRoleIsRequiredAndMustMatchBinding(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	reviewer := orchestration.Binding{Role: "reviewer", Adapter: "fake", Model: "fixture", Reasoning: "none", Permission: "read-only", Workspace: workspace}
+	explorer := reviewer
+	explorer.Role = "explorer"
+	config := policy.DefaultConfig()
+	config.RegisteredBindings = []orchestration.Binding{reviewer, explorer}
+	store, err := storage.New(filepath.Join(root, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	core, err := New(store, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := core.CreateTask(CreateTaskInput{Objective: "role admission", Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review"}); err == nil {
+		t.Fatal("node without role was accepted")
+	} else if gatewayErr, ok := err.(*Error); !ok || gatewayErr.Code != "role_required" {
+		t.Fatalf("missing role error = %v", err)
+	}
+	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review", Role: reviewer.Role})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight, err := core.RunPreflight(RunPreflightInput{NodeID: node.Node.ID, Binding: explorer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflight.Preflight.Status != "blocked" || preflight.Preflight.Code != "node_role_mismatch" {
+		t.Fatalf("role mismatch preflight = %#v", preflight.Preflight)
+	}
+}
+
+func TestGatewayRejectsReservedAdapterLifecycleActions(t *testing.T) {
+	for _, kind := range []orchestration.ActionKind{orchestration.ActionSend, orchestration.ActionCleanup} {
+		t.Run(string(kind), func(t *testing.T) {
+			core, store, launch := preparedAttemptForTest(t)
+			state, err := store.Load(launch.Attempt.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			action := state.Actions[launch.LaunchAction.ID]
+			action.Kind = kind
+			state.Actions[action.ID] = action
+			if err := store.Save(state); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := core.SubmitHostActionResult(SubmitHostActionResultInput{AttemptID: launch.Attempt.ID, ActionID: action.ID, Lease: action.Lease, Result: orchestration.HostActionResult{Status: "completed"}}); err == nil {
+				t.Fatalf("reserved %s action was accepted", kind)
+			} else if gatewayErr, ok := err.(*Error); !ok || gatewayErr.Code != "unknown_action_kind" {
+				t.Fatalf("reserved %s action error = %v", kind, err)
+			}
+		})
 	}
 }
 
@@ -265,7 +391,7 @@ func TestMismatchedTaskCanaryFreezesAttempt(t *testing.T) {
 	if approved, err := core.RecordHumanDecision(HumanDecisionInput{NodeID: fresh.Attempt.NodeID, Decision: "approve", AuthorityRef: "user-input:approve-after-release"}); err != nil || approved.Node.Status != orchestration.NodeApproved {
 		t.Fatalf("ordinary approval remained blocked after contamination was explicitly released: result=%#v err=%v", approved, err)
 	}
-	if _, err := core.ProposeNode(ProposeNodeInput{TaskID: launch.Attempt.TaskID, Kind: "downstream-after-release"}); err != nil {
+	if _, err := core.ProposeNode(ProposeNodeInput{TaskID: launch.Attempt.TaskID, Kind: "downstream-after-release", Role: "reviewer"}); err != nil {
 		t.Fatalf("explicit contamination release did not permit downstream proposal: %v", err)
 	}
 }
@@ -300,15 +426,58 @@ func TestRequiredArtifactControlsCompletion(t *testing.T) {
 	if missing.Decision.Status != orchestration.AttemptIncomplete || missing.Decision.Reason != "delivery_missing" {
 		t.Fatalf("missing artifact completion = %#v", missing.Decision)
 	}
-	if err := os.WriteFile(artifactPath, []byte("# Review\n\n## Findings\nnone\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	complete, err := core.RequestCompletion(CompletionInput{AttemptID: launch.Attempt.ID})
+	missingState, err := store.Load(launch.Attempt.TaskID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if complete.Decision.Status != orchestration.AttemptCompleted || len(complete.Decision.Artifacts) != 1 || !complete.Decision.Artifacts[0].Validated {
-		t.Fatalf("validated artifact completion = %#v", complete.Decision)
+	for _, action := range missingState.Actions {
+		if action.Kind == orchestration.ActionSend || action.Kind == orchestration.ActionCleanup {
+			t.Fatalf("Gateway issued reserved host action after delivery_missing: %#v", action)
+		}
+	}
+	if err := os.WriteFile(artifactPath, []byte("# Review\n\n## Findings\nnone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.RequestCompletion(CompletionInput{AttemptID: launch.Attempt.ID}); err == nil {
+		t.Fatal("delivery_missing checkpoint was recomputed in place")
+	} else if gatewayErr, ok := err.(*Error); !ok || gatewayErr.Code != "completion_already_recorded" {
+		t.Fatalf("recomputed completion error = %v", err)
+	}
+	if _, err := core.RecordHumanDecision(HumanDecisionInput{NodeID: launch.Attempt.NodeID, Decision: "approve", AuthorityRef: "user-input:approve-missing-delivery"}); err == nil {
+		t.Fatal("delivery_missing checkpoint accepted ordinary approval")
+	} else if gatewayErr, ok := err.(*Error); !ok || gatewayErr.Code != "delivery_revision_required" {
+		t.Fatalf("delivery_missing approval error = %v", err)
+	}
+}
+
+func TestObserveActionLeaseCoversLongRunningProviderWait(t *testing.T) {
+	core, _, launch := preparedAttemptForTest(t)
+	if got := launch.LaunchAction.ExpiresAt.Sub(launch.LaunchAction.IssuedAt); got != controlActionLeaseDuration {
+		t.Fatalf("launch lease = %s, want %s", got, controlActionLeaseDuration)
+	}
+	started := true
+	receipt, err := core.SubmitHostActionResult(SubmitHostActionResultInput{
+		AttemptID: launch.Attempt.ID,
+		ActionID:  launch.LaunchAction.ID,
+		Lease:     launch.LaunchAction.Lease,
+		Result: orchestration.HostActionResult{
+			Status:            "running",
+			ProviderHandle:    "native-reviewer",
+			ProviderSessionID: "native-session",
+			ExecutionStarted:  &started,
+			SideEffectState:   "none",
+			Identity:          map[string]string{"provider": "fake", "session": "native-session", "workspace": launch.Attempt.Binding.Workspace},
+			TaskCanary:        launch.Attempt.TaskCanary,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipt.Next) != 1 || receipt.Next[0].Kind != orchestration.ActionObserve {
+		t.Fatalf("next actions = %#v", receipt.Next)
+	}
+	if got := receipt.Next[0].ExpiresAt.Sub(receipt.Next[0].IssuedAt); got != observeActionLeaseDuration {
+		t.Fatalf("observe lease = %s, want %s", got, observeActionLeaseDuration)
 	}
 }
 
@@ -459,7 +628,7 @@ func TestGoalAuthorityAndAuthorityReferenceAreValidated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review"})
+	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review", Role: "reviewer"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +703,7 @@ func TestGoalAuthorityCannotCrossRevisionBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review"})
+	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review", Role: "reviewer"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +773,7 @@ func preparedAttemptForTestWithOutput(t *testing.T, expected orchestration.Expec
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review", ExpectedOutput: expected})
+	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review", Role: "reviewer", ExpectedOutput: expected})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,7 +809,7 @@ func TestUnspecifiedNodeIsRecordedButCannotBecomeExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeResult, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID})
+	nodeResult, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Role: "reviewer"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -863,7 +1032,7 @@ func TestFallbackApprovalIsAttemptBoundAndDoesNotReleaseCheckpoint(t *testing.T)
 	if err != nil || approved.Node.Status != orchestration.NodeApproved {
 		t.Fatalf("ordinary approval after fallback completion = result=%#v err=%v", approved, err)
 	}
-	if _, err := core.ProposeNode(ProposeNodeInput{TaskID: fallback.Attempt.TaskID, Kind: "downstream-after-fallback"}); err != nil {
+	if _, err := core.ProposeNode(ProposeNodeInput{TaskID: fallback.Attempt.TaskID, Kind: "downstream-after-fallback", Role: "reviewer"}); err != nil {
 		t.Fatalf("completed and approved fallback did not release downstream: %v", err)
 	}
 }
@@ -961,7 +1130,9 @@ func TestPrepareAttemptRetryLineageRequiresHumanRetryDecision(t *testing.T) {
 	}
 	node := state.Nodes[launch.Attempt.NodeID]
 	node.Status = orchestration.NodeAwaitingHumanDecision
+	node.CheckpointAttemptID = failed.Attempt.ID
 	state.Nodes[node.ID] = node
+	state.Task.Status = orchestration.TaskAwaitingHumanDecision
 	if err := store.Save(state); err != nil {
 		t.Fatal(err)
 	}
@@ -1241,7 +1412,7 @@ func TestRetryAndFallbackCreateImmutableAttemptLineage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review"})
+	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review", Role: "reviewer"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1322,7 +1493,7 @@ func TestFallbackRunsCandidatePreflightBeforeIssuingLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review"})
+	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review", Role: "reviewer"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1366,7 +1537,7 @@ func TestRequestRevisionCreatesNewRevisionAndPreservesCheckpointHistory(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review"})
+	node, err := core.ProposeNode(ProposeNodeInput{TaskID: task.Task.ID, Kind: "review", Role: "reviewer"})
 	if err != nil {
 		t.Fatal(err)
 	}

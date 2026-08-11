@@ -24,7 +24,10 @@ import (
 	"agent-workflow-toolkit/internal/storage"
 )
 
-const actionLeaseDuration = 5 * time.Minute
+const (
+	controlActionLeaseDuration = 5 * time.Minute
+	observeActionLeaseDuration = 15 * time.Minute
+)
 
 type Error struct {
 	Code    string
@@ -196,9 +199,10 @@ type CancelResult struct {
 }
 
 type Gateway struct {
-	store  *storage.Store
-	config policy.Config
-	mu     sync.Mutex
+	store       *storage.Store
+	config      policy.Config
+	saveReceipt func(storage.RequestReceipt) error
+	mu          sync.Mutex
 }
 
 func New(store *storage.Store, config policy.Config) (*Gateway, error) {
@@ -209,7 +213,7 @@ func New(store *storage.Store, config policy.Config) (*Gateway, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return &Gateway{store: store, config: config}, nil
+	return &Gateway{store: store, config: config, saveReceipt: store.SaveReceipt}, nil
 }
 
 func (g *Gateway) Handle(request protocol.Request) (json.RawMessage, error) {
@@ -222,18 +226,45 @@ func (g *Gateway) Handle(request protocol.Request) (json.RawMessage, error) {
 		if receipt.Operation != request.Operation || receipt.PayloadHash != payloadHash {
 			return nil, fail("request_id_reused", "request_id was already used with different content", nil)
 		}
-		return receipt.Payload, nil
+		switch receipt.Status {
+		case storage.RequestCompleted:
+			return receipt.Payload, nil
+		case storage.RequestFailed:
+			return nil, fail(receipt.Failure.Code, receipt.Failure.Message, receipt.Failure.Details)
+		case storage.RequestPending, storage.RequestOutcomeUnknown:
+			return nil, fail("request_outcome_unknown", "request was started but its durable outcome is not safely replayable", map[string]any{"status": receipt.Status})
+		default:
+			return nil, fail("request_receipt_invalid", "request receipt has an unsupported status", map[string]any{"status": receipt.Status})
+		}
+	}
+	pending := storage.RequestReceipt{RequestID: request.RequestID, Operation: request.Operation, PayloadHash: payloadHash, Status: storage.RequestPending}
+	if err := g.saveReceipt(pending); err != nil {
+		return nil, fmt.Errorf("persist pending request journal: %w", err)
 	}
 	result, err := g.dispatch(request.Operation, request.Payload)
 	if err != nil {
+		if gatewayErr, ok := err.(*Error); ok {
+			failure := storage.RequestReceipt{
+				RequestID: request.RequestID, Operation: request.Operation, PayloadHash: payloadHash, Status: storage.RequestFailed,
+				Failure: &storage.RequestFailure{Code: gatewayErr.Code, Message: gatewayErr.Message, Details: gatewayErr.Details},
+			}
+			if receiptErr := g.saveReceipt(failure); receiptErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("persist failed request outcome: %w", receiptErr))
+			}
+			return nil, err
+		}
+		_ = g.saveReceipt(storage.RequestReceipt{RequestID: request.RequestID, Operation: request.Operation, PayloadHash: payloadHash, Status: storage.RequestOutcomeUnknown})
 		return nil, err
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
+		_ = g.saveReceipt(storage.RequestReceipt{RequestID: request.RequestID, Operation: request.Operation, PayloadHash: payloadHash, Status: storage.RequestOutcomeUnknown})
 		return nil, fmt.Errorf("marshal gateway result: %w", err)
 	}
-	if err := g.store.SaveReceipt(storage.RequestReceipt{RequestID: request.RequestID, Operation: request.Operation, PayloadHash: payloadHash, Payload: raw}); err != nil {
-		return nil, err
+	completed := storage.RequestReceipt{RequestID: request.RequestID, Operation: request.Operation, PayloadHash: payloadHash, Status: storage.RequestCompleted, Payload: raw}
+	if err := g.saveReceipt(completed); err != nil {
+		_ = g.saveReceipt(storage.RequestReceipt{RequestID: request.RequestID, Operation: request.Operation, PayloadHash: payloadHash, Status: storage.RequestOutcomeUnknown})
+		return nil, fmt.Errorf("persist completed request outcome: %w", err)
 	}
 	return raw, nil
 }
@@ -368,6 +399,10 @@ func (g *Gateway) ProposeNode(input ProposeNodeInput) (ProposeNodeResult, error)
 	if _, ok := state.Revisions[revisionID]; !ok {
 		return ProposeNodeResult{}, fail("unknown_revision", "revision does not belong to task", nil)
 	}
+	role := strings.TrimSpace(input.Role)
+	if role == "" {
+		return ProposeNodeResult{}, fail("role_required", "workflow node role must be explicitly named", nil)
+	}
 	now := time.Now().UTC()
 	kind := strings.TrimSpace(input.Kind)
 	status := orchestration.NodeProposed
@@ -379,7 +414,7 @@ func (g *Gateway) ProposeNode(input ProposeNodeInput) (ProposeNodeResult, error)
 		status = orchestration.NodePreflightBlocked
 		preflightStatus, preflightCode = "blocked", "unspecified_node"
 	}
-	node := orchestration.WorkflowNode{ID: orchestration.NewID("node"), TaskID: state.Task.ID, RevisionID: revisionID, Kind: kind, Role: input.Role, Status: status, CheckpointMode: state.Task.CheckpointMode, PreflightStatus: preflightStatus, PreflightCode: preflightCode, ExpectedOutput: input.ExpectedOutput, CreatedAt: now, UpdatedAt: now}
+	node := orchestration.WorkflowNode{ID: orchestration.NewID("node"), TaskID: state.Task.ID, RevisionID: revisionID, Kind: kind, Role: role, Status: status, CheckpointMode: state.Task.CheckpointMode, PreflightStatus: preflightStatus, PreflightCode: preflightCode, ExpectedOutput: input.ExpectedOutput, CreatedAt: now, UpdatedAt: now}
 	state.Nodes[node.ID] = node
 	event := orchestration.NewEvent(state.Task.ID, "node.proposed", map[string]any{"node_id": node.ID, "revision_id": revisionID, "kind": node.Kind, "preflight_code": preflightCode})
 	event.NodeID = node.ID
@@ -400,6 +435,10 @@ func (g *Gateway) RunPreflight(input RunPreflightInput) (RunPreflightResult, err
 	decision := g.config.Preflight(state.Task, input.Binding)
 	if node.Kind == "unspecified" {
 		decision = policy.PreflightDecision{Status: "blocked", Code: "unspecified_node", Reason: "workflow node kind must be explicitly named", MCPIsolation: selectedMCPIsolation(g.config.MCPIsolation), Binding: input.Binding}
+	} else if strings.TrimSpace(node.Role) == "" {
+		decision = policy.PreflightDecision{Status: "blocked", Code: "node_role_required", Reason: "workflow node role must be explicitly named", MCPIsolation: selectedMCPIsolation(g.config.MCPIsolation), Binding: input.Binding}
+	} else if strings.TrimSpace(input.Binding.Role) != node.Role {
+		decision = policy.PreflightDecision{Status: "blocked", Code: "node_role_mismatch", Reason: "binding role must match the workflow node role", MCPIsolation: selectedMCPIsolation(g.config.MCPIsolation), Binding: input.Binding}
 	}
 	node.PreflightStatus = decision.Status
 	node.PreflightCode = decision.Code
@@ -783,10 +822,6 @@ func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (Act
 		} else {
 			attempt.Status = orchestration.AttemptCancelUnconfirmed
 		}
-	case orchestration.ActionSend:
-		if attempt.Status != orchestration.AttemptContaminated && (input.Result.Status == "failed" || input.Result.Status == "error") {
-			attempt.Status = orchestration.AttemptIncomplete
-		}
 	}
 	state.Attempts[attempt.ID] = attempt
 	if err := validateAttemptStatusTransition(previousStatus, attempt.Status); err != nil {
@@ -895,6 +930,9 @@ func (g *Gateway) RequestCompletion(input CompletionInput) (CompletionResult, er
 	node, ok := state.Nodes[attempt.NodeID]
 	if !ok {
 		return CompletionResult{}, fail("unknown_node", "node was not found", nil)
+	}
+	if node.Status == orchestration.NodeAwaitingHumanDecision && node.CheckpointAttemptID == attempt.ID {
+		return CompletionResult{}, fail("completion_already_recorded", "the current Attempt already has a human checkpoint; record request_revision or abort instead of recomputing completion", map[string]any{"attempt_id": attempt.ID})
 	}
 	decision := orchestration.CompletionDecision{ID: orchestration.NewID("completion"), AttemptID: attempt.ID, Status: attempt.Status, CreatedAt: time.Now().UTC()}
 	if attempt.Status != orchestration.AttemptCompleted {
@@ -1031,6 +1069,15 @@ func (g *Gateway) RecordHumanDecision(input HumanDecisionInput) (HumanDecisionRe
 	if contaminated && input.Decision != "release_contamination" && input.Decision != "request_revision" && input.Decision != "abort" {
 		return HumanDecisionResult{}, fail("contamination_release_required", "contaminated execution requires an explicit release_contamination, request_revision or abort decision", nil)
 	}
+	if input.Decision == "retry_node" {
+		checkpointAttempt, ok := state.Attempts[node.CheckpointAttemptID]
+		if !ok || checkpointAttempt.NodeID != node.ID {
+			return HumanDecisionResult{}, fail("retry_not_allowed", "retry_node requires the current checkpoint Attempt", nil)
+		}
+		if checkpointAttempt.Status == orchestration.AttemptCompleted {
+			return HumanDecisionResult{}, fail("retry_not_allowed", "a completed Attempt cannot be retried; use request_revision or abort for missing delivery", map[string]any{"attempt_id": checkpointAttempt.ID})
+		}
+	}
 	fallbackApproval := false
 	if input.Decision == "approve" && strings.TrimSpace(input.AttemptID) != "" {
 		if !validFallbackApproval(state, node, input.AttemptID) {
@@ -1040,7 +1087,11 @@ func (g *Gateway) RecordHumanDecision(input HumanDecisionInput) (HumanDecisionRe
 	}
 	if input.Decision == "approve" && !fallbackApproval && node.CheckpointAttemptID != "" {
 		checkpointAttempt, ok := state.Attempts[node.CheckpointAttemptID]
-		if !ok || checkpointAttempt.NodeID != node.ID || checkpointAttempt.Status != orchestration.AttemptCompleted || !latestCompletionSucceeded(state, checkpointAttempt.ID) {
+		latestCompletion, completionFound := latestCompletionDecision(state, node.CheckpointAttemptID)
+		if ok && checkpointAttempt.NodeID == node.ID && checkpointAttempt.Status == orchestration.AttemptCompleted && completionFound && latestCompletion.Reason == "delivery_missing" {
+			return HumanDecisionResult{}, fail("delivery_revision_required", "delivery_missing cannot be approved or retried in place; use request_revision or abort", map[string]any{"attempt_id": checkpointAttempt.ID})
+		}
+		if !ok || checkpointAttempt.NodeID != node.ID || checkpointAttempt.Status != orchestration.AttemptCompleted || !completionFound || latestCompletion.Status != orchestration.AttemptCompleted {
 			return HumanDecisionResult{}, fail("fallback_attempt_required", "a failed or incomplete checkpoint requires an attempt-bound fallback approval, not ordinary approval", nil)
 		}
 	}
@@ -1257,7 +1308,14 @@ func (g *Gateway) issueAction(state storage.State, attempt orchestration.Attempt
 		}
 	}
 	now := time.Now().UTC()
-	return orchestration.HostAction{ID: orchestration.NewID("action"), AttemptID: attempt.ID, Kind: kind, Sequence: sequence + 1, Lease: orchestration.NewID("lease"), ControllerInstanceID: controllerID, Parameters: parameters, ParametersHash: orchestration.HashParameters(parameters), Status: orchestration.ActionPending, IssuedAt: now, ExpiresAt: now.Add(actionLeaseDuration)}
+	leaseDuration := controlActionLeaseDuration
+	if kind == orchestration.ActionObserve {
+		// Observe may synchronously wait for a real reviewer/provider turn. Keep
+		// launch and cancellation leases short, but cover the public review
+		// harness's ten-minute execution window without forcing a false unknown.
+		leaseDuration = observeActionLeaseDuration
+	}
+	return orchestration.HostAction{ID: orchestration.NewID("action"), AttemptID: attempt.ID, Kind: kind, Sequence: sequence + 1, Lease: orchestration.NewID("lease"), ControllerInstanceID: controllerID, Parameters: parameters, ParametersHash: orchestration.HashParameters(parameters), Status: orchestration.ActionPending, IssuedAt: now, ExpiresAt: now.Add(leaseDuration)}
 }
 
 func (g *Gateway) saveState(state storage.State) error { return g.store.Save(state) }
@@ -1312,7 +1370,7 @@ func copyStringMap(input map[string]string) map[string]string {
 
 func knownActionKind(kind orchestration.ActionKind) bool {
 	switch kind {
-	case orchestration.ActionLaunch, orchestration.ActionObserve, orchestration.ActionSend, orchestration.ActionCancelHost, orchestration.ActionCleanup:
+	case orchestration.ActionLaunch, orchestration.ActionObserve, orchestration.ActionCancelHost:
 		return true
 	default:
 		return false
@@ -1446,6 +1504,11 @@ func validFallbackApproval(state storage.State, node orchestration.WorkflowNode,
 }
 
 func latestCompletionSucceeded(state storage.State, attemptID string) bool {
+	latest, found := latestCompletionDecision(state, attemptID)
+	return found && latest.Status == orchestration.AttemptCompleted
+}
+
+func latestCompletionDecision(state storage.State, attemptID string) (orchestration.CompletionDecision, bool) {
 	var latest orchestration.CompletionDecision
 	found := false
 	for _, decision := range state.Completions {
@@ -1457,7 +1520,7 @@ func latestCompletionSucceeded(state storage.State, attemptID string) bool {
 			found = true
 		}
 	}
-	return found && latest.Status == orchestration.AttemptCompleted
+	return latest, found
 }
 
 // freezeContamination turns a provider/session/workspace/canary mismatch into

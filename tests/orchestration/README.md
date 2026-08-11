@@ -16,6 +16,43 @@ Get-Content tests/orchestration/fixtures/wave0/valid-request.json |
   go run ./cmd/agent-workflow-core --validate-request
 ```
 
+The project-adoption public path is an ordinary, non-Provider test under
+`cmd/agent-workflow-core/adoption_test.go`. It builds the real binary and
+covers version/envelope semantics, create-to-approve CLI E2E,
+`delivery_missing` revision, cross-process state-dir locking/request replay,
+structured busy errors, and Controller Skill install/receipt verification in
+a clean temporary consumer. Its current acceptance record is
+[`AWT-adoption-hardening.md`](evidence/2026-08-11/AWT-adoption-hardening.md).
+This conformance test does not substitute for the opt-in real Provider smoke
+or the fresh-task Codex App Skill-discovery check.
+
+The independent adoption review is separately opt-in and invokes a real
+Cursor Agent in read-only plan mode:
+
+```powershell
+$env:CURSOR_ADAPTER_ADOPTION_REVIEW='1'
+$env:CURSOR_ADAPTER_EXECUTABLE='C:\Users\<user>\AppData\Local\cursor-agent\agent.cmd'
+$env:CURSOR_ADAPTER_SMOKE_WORKSPACE='E:\projects\agent-workflow-toolkit'
+$env:CURSOR_ADAPTER_SMOKE_MODEL='cursor-grok-4.5-high'
+go test -run '^TestRealCursorProjectAdoptionReview$' -v ./internal/adapters/cursor
+```
+
+The staged report is
+[`2026-08-11-project-adoption-cursor-review.md`](../../docs/reviews/2026-08-11-project-adoption-cursor-review.md).
+
+After fixing review findings, close them through the separate targeted artifact:
+
+```powershell
+$env:CURSOR_ADAPTER_ADOPTION_RECHECK='1'
+$env:CURSOR_ADAPTER_EXECUTABLE='C:\Users\<user>\AppData\Local\cursor-agent\agent.cmd'
+$env:CURSOR_ADAPTER_SMOKE_WORKSPACE='E:\projects\agent-workflow-toolkit'
+$env:CURSOR_ADAPTER_SMOKE_MODEL='cursor-grok-4.5-high'
+go test -run '^TestRealCursorProjectAdoptionTargetedRecheck$' -v ./internal/adapters/cursor
+```
+
+The closure report is
+[`2026-08-11-project-adoption-cursor-targeted-recheck.md`](../../docs/reviews/2026-08-11-project-adoption-cursor-targeted-recheck.md).
+
 The Codex CLI delivery regression smoke is opt-in because it performs a real provider call:
 
 ```powershell

@@ -57,8 +57,10 @@ const (
 type ActionKind string
 
 const (
-	ActionLaunch     ActionKind = "launch"
-	ActionObserve    ActionKind = "observe"
+	ActionLaunch  ActionKind = "launch"
+	ActionObserve ActionKind = "observe"
+	// ActionSend and ActionCleanup are reserved Adapter lifecycle primitives.
+	// TaskGateway protocol v1 does not issue or accept them as HostActions.
 	ActionSend       ActionKind = "send"
 	ActionCancelHost ActionKind = "cancel_host"
 	ActionCleanup    ActionKind = "cleanup"

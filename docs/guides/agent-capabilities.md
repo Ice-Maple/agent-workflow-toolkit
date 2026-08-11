@@ -90,7 +90,7 @@ Wave 3 默认配置不注册 `Stop`；[`stop.py`](../../tools/context_continuity
 `skills/multi-agent-orchestration/` Controller Skill 已完成真实 Codex App Native smoke、artifact 校验和人工批准，
 详见 `tests/orchestration/evidence/2026-08-09/W2-native-app-smoke.md`；Wave 2 Native MVP 已验收。Wave 3 的 Cursor Agent、
 Claude Code 和 Codex CLI 只读 Adapter 均已完成实现、真实 smoke、独立 review 和 targeted closure，记录见
-[`Wave 3 当前状态`](../../docs/reviews/2026-08-09-wave3-current-status.md)。Wave 4 已补齐跨路径硬化、完整 benchmark 和最终独立 review；四条受控只读路径现已验收为 `experimental`，记录见 [`W4-experimental-acceptance.md`](../../tests/orchestration/evidence/2026-08-11/W4-experimental-acceptance.md)。
+[`Wave 3 当前状态`](../../docs/reviews/2026-08-09-wave3-current-status.md)。Wave 4 已补齐跨路径硬化、完整 benchmark 和最终独立 review；四条受控只读路径现已验收为 `experimental`，记录见 [`W4-experimental-acceptance.md`](../../tests/orchestration/evidence/2026-08-11/W4-experimental-acceptance.md)。后续 project-adoption hardening 又补齐 Skill receipt、public CLI E2E、跨进程锁/request journal/state schema，并通过真实 Native smoke 与 Cursor targeted closure，见 [`AWT-adoption-hardening.md`](../../tests/orchestration/evidence/2026-08-11/AWT-adoption-hardening.md)。
 
 ## 按目录判断“这是什么”
 

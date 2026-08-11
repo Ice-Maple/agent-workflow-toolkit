@@ -3,10 +3,27 @@ package policy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"agent-workflow-toolkit/internal/orchestration"
 )
+
+func TestLoadJSONRejectsUnknownAndTrailingConfiguration(t *testing.T) {
+	for name, raw := range map[string]string{
+		"top-level unknown": `{"retry_mode":"limited_auto","goal_enabeld":true}`,
+		"nested unknown":    `{"registered_bindings":[{"role":"reviewer","adapter":"fake","model":"fixture","reasoning":"none","permission":"read-only","workspace":"C:\\work","mcp_allowlist":[],"permisson":"read-only"}]}`,
+		"trailing value":    `{"retry_mode":"limited_auto"} {"goal_enabled":false}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadJSON([]byte(raw)); err == nil {
+				t.Fatal("invalid policy was accepted")
+			} else if name != "trailing value" && !strings.Contains(err.Error(), "unknown field") {
+				t.Fatalf("policy error = %v, want unknown field", err)
+			}
+		})
+	}
+}
 
 func TestPreflightRequiresExactRegisteredBinding(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
