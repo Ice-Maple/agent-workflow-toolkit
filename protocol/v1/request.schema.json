@@ -21,6 +21,7 @@
         "prepareRetryAttempt",
         "prepareFallbackAttempt",
         "pollHostActions",
+        "getAttempt",
         "submitHostActionResult",
         "bindProviderHandle",
         "appendEvent",

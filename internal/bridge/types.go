@@ -38,19 +38,21 @@ type Request struct {
 }
 
 type OwnerReceipt struct {
-	SchemaVersion     string    `json:"schema_version"`
-	AttemptID         string    `json:"attempt_id"`
-	ActionID          string    `json:"action_id"`
-	Provider          string    `json:"provider"`
-	ProfileID         string    `json:"profile_id"`
-	ProfileHash       string    `json:"profile_hash"`
-	Workspace         string    `json:"workspace"`
-	OwnerPID          int       `json:"owner_pid"`
-	OwnerStartMarker  string    `json:"owner_start_marker"`
-	Endpoint          string    `json:"endpoint"`
-	Capability        string    `json:"capability"`
-	ProviderHandle    string    `json:"provider_handle,omitempty"`
-	ProviderSessionID string    `json:"provider_session_id,omitempty"`
-	LastHeartbeat     time.Time `json:"last_heartbeat"`
-	State             string    `json:"state"`
+	SchemaVersion      string    `json:"schema_version"`
+	AttemptID          string    `json:"attempt_id"`
+	ActionID           string    `json:"action_id"`
+	LastActionID       string    `json:"last_action_id,omitempty"`
+	LastActionSequence int       `json:"last_action_sequence,omitempty"`
+	Provider           string    `json:"provider"`
+	ProfileID          string    `json:"profile_id"`
+	ProfileHash        string    `json:"profile_hash"`
+	Workspace          string    `json:"workspace"`
+	OwnerPID           int       `json:"owner_pid"`
+	OwnerStartMarker   string    `json:"owner_start_marker"`
+	Endpoint           string    `json:"endpoint"`
+	Capability         string    `json:"capability"`
+	ProviderHandle     string    `json:"provider_handle,omitempty"`
+	ProviderSessionID  string    `json:"provider_session_id,omitempty"`
+	LastHeartbeat      time.Time `json:"last_heartbeat"`
+	State              string    `json:"state"`
 }

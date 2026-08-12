@@ -303,7 +303,7 @@ func classifyCollaborationRequest(request protocol.Request) (bool, string, strin
 			return false, "", "", 0, "", nil
 		}
 		return true, "", raw.CollaborationRunID, raw.GateEpoch, raw.AttemptID, nil
-	case "pollHostActions", "submitHostActionResult", "bindProviderHandle", "appendEvent", "requestCancel":
+	case "pollHostActions", "getAttempt", "submitHostActionResult", "bindProviderHandle", "appendEvent", "requestCancel":
 		if raw.AttemptID == "" {
 			return false, "", "", 0, "", nil
 		}

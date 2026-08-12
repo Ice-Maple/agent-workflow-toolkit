@@ -123,7 +123,17 @@ type PollHostActionsInput struct {
 
 type HostActionBatch struct {
 	AttemptID string                     `json:"attempt_id"`
+	Attempt   orchestration.Attempt      `json:"attempt"`
 	Actions   []orchestration.HostAction `json:"actions"`
+}
+
+type GetAttemptInput struct {
+	AttemptID string `json:"attempt_id"`
+}
+
+type GetAttemptResult struct {
+	Attempt orchestration.Attempt      `json:"attempt"`
+	Node    orchestration.WorkflowNode `json:"node"`
 }
 
 type SubmitHostActionResultInput struct {
@@ -913,6 +923,12 @@ func (g *Gateway) dispatch(operation string, raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return g.PollHostActions(input)
+	case "getAttempt":
+		var input GetAttemptInput
+		if err := decodePayload(raw, &input); err != nil {
+			return nil, err
+		}
+		return g.GetAttempt(input)
 	case "submitHostActionResult":
 		var input SubmitHostActionResultInput
 		if err := decodePayload(raw, &input); err != nil {
@@ -1354,7 +1370,20 @@ func (g *Gateway) PollHostActions(input PollHostActionsInput) (HostActionBatch, 
 			return HostActionBatch{}, err
 		}
 	}
-	return HostActionBatch{AttemptID: attempt.ID, Actions: sortActions(actions)}, nil
+	return HostActionBatch{AttemptID: attempt.ID, Attempt: attempt, Actions: sortActions(actions)}, nil
+}
+
+// GetAttempt returns the frozen Attempt and its owning node without exposing
+// the storage snapshot to a host executor. It is read-only from the domain
+// perspective, but still goes through the Gateway request journal/locking
+// boundary when called via the public CLI.
+func (g *Gateway) GetAttempt(input GetAttemptInput) (GetAttemptResult, error) {
+	state, attempt, err := g.loadAttempt(input.AttemptID)
+	if err != nil {
+		return GetAttemptResult{}, err
+	}
+	node := state.Nodes[attempt.NodeID]
+	return GetAttemptResult{Attempt: attempt, Node: node}, nil
 }
 
 func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (ActionReceipt, error) {

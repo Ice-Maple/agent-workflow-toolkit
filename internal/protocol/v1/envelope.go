@@ -27,6 +27,7 @@ var operations = map[string]struct{}{
 	"prepareRetryAttempt":                 {},
 	"prepareFallbackAttempt":              {},
 	"pollHostActions":                     {},
+	"getAttempt":                          {},
 	"submitHostActionResult":              {},
 	"bindProviderHandle":                  {},
 	"appendEvent":                         {},

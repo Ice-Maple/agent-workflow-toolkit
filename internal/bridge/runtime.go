@@ -128,6 +128,9 @@ func AdapterPreflight(ctx context.Context, binding orchestration.Binding, profil
 	if err := validateProfile(profile); err != nil {
 		return PreflightResult{}, err
 	}
+	if !strings.EqualFold(profile.ProfileHash, orchestration.HashAdapterProfile(profile.AdapterProfile)) {
+		return PreflightResult{}, errors.New("adapter profile content hash mismatch")
+	}
 	provider := normalizeProvider(binding.Adapter)
 	if profile.Adapter != provider {
 		return PreflightResult{}, errors.New("adapter profile does not match binding adapter")
