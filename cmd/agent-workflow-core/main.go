@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-workflow-toolkit/internal/coordination"
 	"agent-workflow-toolkit/internal/gateway"
 	"agent-workflow-toolkit/internal/policy"
 	protocol "agent-workflow-toolkit/internal/protocol/v1"
@@ -34,7 +35,11 @@ func main() {
 	showVersion := flag.Bool("version", false, "print the core version")
 	validateRequest := flag.Bool("validate-request", false, "validate one protocol v1 envelope from stdin")
 	gatewayMode := flag.Bool("gateway", false, "handle one protocol v1 request through the TaskGateway")
+	statusMode := flag.Bool("status", false, "show machine-local collaboration status")
+	enableMode := flag.Bool("enable", false, "enable the machine-local collaboration framework gate")
+	disableMode := flag.Bool("disable", false, "disable the machine-local collaboration framework gate")
 	stateDir := flag.String("state-dir", "", "directory for task state and request receipts")
+	coordinationDir := flag.String("coordination-dir", "", "machine-local collaboration coordination directory")
 	policyFile := flag.String("policy-file", "", "JSON policy file containing registered bindings")
 	lockTimeout := flag.Duration("lock-timeout", 5*time.Second, "maximum time to wait for exclusive state-dir access")
 	flag.Parse()
@@ -44,9 +49,45 @@ func main() {
 		fmt.Printf("agent-workflow-core version=%s protocol=%d maturity=%s revision=%s dirty=%t\n", metadata.Version, metadata.ProtocolMajor, metadata.Maturity, metadata.Revision, metadata.Dirty)
 		return
 	}
-	if !*validateRequest && !*gatewayMode {
-		fmt.Fprintln(os.Stderr, "usage: agent-workflow-core --version | --validate-request | --gateway [--state-dir DIR] [--policy-file FILE]")
+	controlMode := *statusMode || *enableMode || *disableMode
+	if !*validateRequest && !*gatewayMode && !controlMode {
+		fmt.Fprintln(os.Stderr, "usage: agent-workflow-core --version | --validate-request | --gateway [--state-dir DIR] [--coordination-dir DIR] [--policy-file FILE] | --status | --enable | --disable")
 		os.Exit(2)
+	}
+
+	if controlMode {
+		if *statusMode && (*enableMode || *disableMode) || *enableMode && *disableMode {
+			fmt.Fprintln(os.Stderr, "--status, --enable and --disable are mutually exclusive")
+			os.Exit(2)
+		}
+		root, err := resolveCoordinationRoot(*coordinationDir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		manager, err := coordination.New(root, *lockTimeout)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		var output any
+		switch {
+		case *statusMode:
+			output, err = manager.Status("")
+		case *enableMode:
+			output, err = manager.SetFrameworkEnabled(true)
+		case *disableMode:
+			output, err = manager.Disable()
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := encodeControlOutput(output); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	request, err := protocol.DecodeRequest(os.Stdin)
@@ -84,7 +125,92 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	rootLock, err := storage.AcquireRootLock(root, *lockTimeout)
+	coordRoot, err := resolveCoordinationRoot(*coordinationDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	coordManager, err := coordination.New(coordRoot, *lockTimeout)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	collaborationRequest, stateDirForLock, runID, gateEpoch, attemptID, classifyErr := classifyCollaborationRequest(request)
+	if classifyErr != nil {
+		writeError(request.RequestID, "invalid_payload", classifyErr.Error(), nil)
+		return
+	}
+	if collaborationRequest {
+		// The collaboration facade owns the complete lock order. It must not be
+		// composed from the legacy state-dir-only one-shot path.
+		var locks *coordination.LockSet
+		var entry storage.ActiveRunEntry
+		var lockErr error
+		switch {
+		case request.Operation == "createCollaborationRun":
+			locks, lockErr = coordManager.AcquireRunLocks(stateDirForLock)
+		case request.Operation == "prepareAttempt":
+			locks, entry, lockErr = coordManager.AcquireRunLocksForRun(runID, gateEpoch)
+		case request.Operation == "recordCollaborationTechnicalRelease":
+			locks, entry, lockErr = coordManager.AcquireRunLocksForConvergence(runID)
+		case request.Operation == "requestCompletion":
+			locks, entry, lockErr = coordManager.AcquireRunLocksForConvergence(runID)
+		default:
+			var found bool
+			locks, entry, found, lockErr = coordManager.AcquireRunLocksForAttempt(attemptID)
+			if lockErr == nil && !found {
+				// There is no indexed collaboration Attempt. Retain the
+				// state-dir-only compatibility path for ordinary protocol calls.
+				runLegacyGateway(request, root, config, *lockTimeout)
+				return
+			}
+		}
+		if lockErr != nil {
+			if errors.Is(lockErr, storage.ErrStateDirBusy) {
+				writeError(request.RequestID, "state_dir_busy", "another gateway process owns this state-dir", nil)
+				return
+			}
+			fmt.Fprintln(os.Stderr, lockErr)
+			os.Exit(1)
+		}
+		if entry.StateDir != "" {
+			stateDirForLock = entry.StateDir
+		}
+		if *stateDir != "" && stateDirForLock != "" && !samePath(*stateDir, stateDirForLock) {
+			_ = locks.Release()
+			writeError(request.RequestID, "state_dir_mismatch", "the request state-dir does not match the collaboration run", nil)
+			return
+		}
+		if strings.TrimSpace(stateDirForLock) == "" {
+			_ = locks.Release()
+			writeError(request.RequestID, "state_dir_required", "collaboration request requires a state-dir", nil)
+			return
+		}
+		root = stateDirForLock
+		defer func() {
+			if releaseErr := locks.Release(); releaseErr != nil {
+				fmt.Fprintln(os.Stderr, releaseErr)
+			}
+		}()
+		store, err := storage.New(root)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		core, err := gateway.NewWithCoordinationLocked(store, config, coordManager)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		payload, err := core.Handle(request)
+		writeGatewayResult(request, payload, err)
+		return
+	}
+	runLegacyGateway(request, root, config, *lockTimeout)
+}
+
+func runLegacyGateway(request protocol.Request, root string, config policy.Config, lockTimeout time.Duration) {
+	rootLock, err := storage.AcquireRootLock(root, lockTimeout)
 	if err != nil {
 		if errors.Is(err, storage.ErrStateDirBusy) {
 			writeError(request.RequestID, "state_dir_busy", "another gateway process owns this state-dir", nil)
@@ -109,6 +235,70 @@ func main() {
 		os.Exit(1)
 	}
 	payload, err := core.Handle(request)
+	writeGatewayResult(request, payload, err)
+}
+
+func resolveCoordinationRoot(explicit string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return filepath.Clean(explicit), nil
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "agent-workflow-toolkit", "coordination"), nil
+}
+
+func classifyCollaborationRequest(request protocol.Request) (bool, string, string, uint64, string, error) {
+	var raw struct {
+		StateDir           string `json:"state_dir"`
+		CollaborationRunID string `json:"collaboration_run_id"`
+		GateEpoch          uint64 `json:"gate_epoch"`
+		RunID              string `json:"run_id"`
+		AttemptID          string `json:"attempt_id"`
+	}
+	if err := json.Unmarshal(request.Payload, &raw); err != nil {
+		return false, "", "", 0, "", err
+	}
+	switch request.Operation {
+	case "createCollaborationRun":
+		return true, raw.StateDir, "", raw.GateEpoch, "", nil
+	case "prepareAttempt":
+		if raw.CollaborationRunID == "" {
+			return false, "", "", 0, "", nil
+		}
+		return true, "", raw.CollaborationRunID, raw.GateEpoch, "", nil
+	case "recordCollaborationTechnicalRelease":
+		return true, "", raw.RunID, 0, "", nil
+	case "requestCompletion":
+		if raw.CollaborationRunID == "" {
+			return false, "", "", 0, "", nil
+		}
+		return true, "", raw.CollaborationRunID, raw.GateEpoch, raw.AttemptID, nil
+	case "pollHostActions", "submitHostActionResult", "bindProviderHandle", "appendEvent", "requestCancel":
+		if raw.AttemptID == "" {
+			return false, "", "", 0, "", nil
+		}
+		return true, "", "", 0, raw.AttemptID, nil
+	default:
+		return false, "", "", 0, "", nil
+	}
+}
+
+func samePath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+	}
+	return strings.EqualFold(leftAbs, rightAbs)
+}
+
+func encodeControlOutput(output any) error {
+	return json.NewEncoder(os.Stdout).Encode(output)
+}
+
+func writeGatewayResult(request protocol.Request, payload json.RawMessage, err error) {
 	if err != nil {
 		if gatewayErr, ok := err.(*gateway.Error); ok {
 			response, responseErr := protocol.NewErrorResponse(request.RequestID, gatewayErr.Code, gatewayErr.Message, gatewayErr.Details)
@@ -122,7 +312,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	writeSuccess(request.RequestID, payload)
+	response, responseErr := protocol.NewSuccessResponse(request.RequestID, payload)
+	if responseErr != nil {
+		fmt.Fprintln(os.Stderr, responseErr)
+		os.Exit(1)
+	}
+	writeResponse(response)
 }
 
 func currentVersionMetadata() versionMetadata {

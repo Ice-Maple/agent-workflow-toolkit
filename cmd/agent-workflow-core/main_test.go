@@ -68,6 +68,50 @@ func TestGatewayCLIExecutesRequestAndPersistsState(t *testing.T) {
 	}
 }
 
+func TestCLIControlUsesIndependentCoordinationDirectory(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "business-state")
+	coordDir := filepath.Join(root, "machine-coordination")
+	binary := filepath.Join(root, "agent-workflow-core")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	build := exec.Command("go", "build", "-o", binary, ".")
+	build.Dir = mustWorkingDirectory(t)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v\n%s", err, output)
+	}
+	for _, args := range [][]string{{"--status", "--coordination-dir", coordDir}, {"--enable", "--coordination-dir", coordDir}} {
+		command := exec.Command(binary, args...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("control command %v: %v\n%s", args, err, output)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(coordDir, "coordination.json")); err != nil {
+		t.Fatalf("coordination state was not written to independent root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "coordination.json")); !os.IsNotExist(err) {
+		t.Fatalf("business state unexpectedly contains coordination state, err=%v", err)
+	}
+
+	command := exec.Command(binary, "--disable", "--coordination-dir", coordDir)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("disable command: %v\n%s", err, output)
+	}
+	var result struct {
+		FrameworkEnabled bool   `json:"framework_enabled"`
+		GateEpoch        uint64 `json:"gate_epoch"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode disable output: %v; output=%s", err, output)
+	}
+	if result.FrameworkEnabled || result.GateEpoch != 2 {
+		t.Fatalf("disable output = %#v", result)
+	}
+}
+
 func mustWorkingDirectory(t *testing.T) string {
 	t.Helper()
 	directory, err := os.Getwd()

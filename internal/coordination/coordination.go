@@ -45,6 +45,27 @@ type Manager struct {
 	lockTimeout time.Duration
 }
 
+// ActiveRunIndexLockPath returns the machine-local lock used by the public
+// CLI facade before it can resolve a run to its state-dir.
+func (m *Manager) ActiveRunIndexLockPath() string {
+	if m == nil || m.store == nil {
+		return ""
+	}
+	return m.store.ActiveRunIndexLockPath()
+}
+
+// LookupRun resolves a run without holding the state-dir lock. Callers that
+// are about to mutate the run must immediately reacquire the complete
+// gate -> index -> state-dir lock set and validate the entry again.
+func (m *Manager) LookupRun(runID string) (storage.ActiveRunEntry, bool, error) {
+	lock, err := storage.AcquireFileLock(m.store.ActiveRunIndexLockPath(), m.lockTimeout)
+	if err != nil {
+		return storage.ActiveRunEntry{}, false, err
+	}
+	defer lock.Release()
+	return m.GetRunUnderLock(runID)
+}
+
 type LockSet struct {
 	gate  *storage.RootLock
 	index *storage.RootLock
@@ -275,6 +296,45 @@ func (m *Manager) AcquireRunLocksForRun(runID string, epoch uint64) (*LockSet, s
 	return &LockSet{gate: gate, index: index, state: stateLock}, entry, nil
 }
 
+// AcquireRunLocksForConvergence is the post-disable counterpart of
+// AcquireRunLocksForRun. It still serializes gate/index/state-dir access and
+// verifies the durable run identity, but does not require the current machine
+// gate to be enabled. It is only for already-issued action/result/terminal
+// convergence; callers must not use it to create a new Attempt or action.
+func (m *Manager) AcquireRunLocksForConvergence(runID string) (*LockSet, storage.ActiveRunEntry, error) {
+	if strings.TrimSpace(runID) == "" {
+		return nil, storage.ActiveRunEntry{}, errors.New("run_id is required")
+	}
+	gate, err := storage.AcquireFileLock(m.store.CoordinationLockPath(), m.lockTimeout)
+	if err != nil {
+		return nil, storage.ActiveRunEntry{}, err
+	}
+	index, err := storage.AcquireFileLock(m.store.ActiveRunIndexLockPath(), m.lockTimeout)
+	if err != nil {
+		_ = gate.Release()
+		return nil, storage.ActiveRunEntry{}, err
+	}
+	active, err := m.store.LoadActiveRunIndex()
+	if err != nil {
+		_ = index.Release()
+		_ = gate.Release()
+		return nil, storage.ActiveRunEntry{}, err
+	}
+	entry, ok := active.Runs[runID]
+	if !ok {
+		_ = index.Release()
+		_ = gate.Release()
+		return nil, storage.ActiveRunEntry{}, errors.New("collaboration run is not active")
+	}
+	stateLock, err := storage.AcquireRootLock(entry.StateDir, m.lockTimeout)
+	if err != nil {
+		_ = index.Release()
+		_ = gate.Release()
+		return nil, storage.ActiveRunEntry{}, err
+	}
+	return &LockSet{gate: gate, index: index, state: stateLock}, entry, nil
+}
+
 // AcquireRunLocksForAttempt resolves an active run by its currently indexed
 // Attempt. It returns found=false when the Attempt belongs to a legacy
 // protocol-v1 task, allowing the caller to retain the old state-dir-only lock.
@@ -291,17 +351,6 @@ func (m *Manager) AcquireRunLocksForAttempt(attemptID string) (*LockSet, storage
 		_ = gate.Release()
 		return nil, storage.ActiveRunEntry{}, false, err
 	}
-	state, err := m.store.LoadCoordination()
-	if err != nil {
-		_ = index.Release()
-		_ = gate.Release()
-		return nil, storage.ActiveRunEntry{}, false, err
-	}
-	if !state.FrameworkEnabled {
-		_ = index.Release()
-		_ = gate.Release()
-		return nil, storage.ActiveRunEntry{}, false, nil
-	}
 	active, err := m.store.LoadActiveRunIndex()
 	if err != nil {
 		_ = index.Release()
@@ -311,11 +360,6 @@ func (m *Manager) AcquireRunLocksForAttempt(attemptID string) (*LockSet, storage
 	for _, entry := range active.Runs {
 		if entry.AttemptID != attemptID {
 			continue
-		}
-		if entry.GateEpoch != state.GateEpoch || entry.ShutdownStatus != "" && entry.ShutdownStatus != "active" {
-			_ = index.Release()
-			_ = gate.Release()
-			return nil, storage.ActiveRunEntry{}, false, fmt.Errorf("collaboration run is not active for Attempt %q", attemptID)
 		}
 		stateLock, lockErr := storage.AcquireRootLock(entry.StateDir, m.lockTimeout)
 		if lockErr != nil {
@@ -328,6 +372,49 @@ func (m *Manager) AcquireRunLocksForAttempt(attemptID string) (*LockSet, storage
 	_ = index.Release()
 	_ = gate.Release()
 	return nil, storage.ActiveRunEntry{}, false, nil
+}
+
+// AttemptStatusUnderLock returns the current machine-gate view for an indexed
+// Attempt. It deliberately keeps found and active separate: after disable,
+// already-issued actions still need a state-dir lock so their real result or
+// cancellation can be recorded, but the caller must not issue new work.
+// Callers must already hold the gate and active-run index locks.
+func (m *Manager) AttemptStatusUnderLock(attemptID string) (storage.ActiveRunEntry, bool, bool, error) {
+	if strings.TrimSpace(attemptID) == "" {
+		return storage.ActiveRunEntry{}, false, false, errors.New("attempt_id is required")
+	}
+	state, err := m.store.LoadCoordination()
+	if err != nil {
+		return storage.ActiveRunEntry{}, false, false, err
+	}
+	entry, found, err := m.GetAttemptRunUnderLock(attemptID)
+	if err != nil || !found {
+		return storage.ActiveRunEntry{}, found, false, err
+	}
+	active := state.FrameworkEnabled && entry.GateEpoch == state.GateEpoch &&
+		(entry.ShutdownStatus == "" || entry.ShutdownStatus == "active")
+	return entry, true, active, nil
+}
+
+// RunStatusUnderLock returns the durable run entry and whether its current
+// gate epoch is still allowed to create or advance work. It is intentionally
+// usable for already-issued action convergence after a global disable.
+// Callers must already hold the gate and active-run index locks.
+func (m *Manager) RunStatusUnderLock(runID, stateDir string) (storage.ActiveRunEntry, bool, error) {
+	if strings.TrimSpace(runID) == "" {
+		return storage.ActiveRunEntry{}, false, errors.New("run_id is required")
+	}
+	state, err := m.store.LoadCoordination()
+	if err != nil {
+		return storage.ActiveRunEntry{}, false, err
+	}
+	entry, err := m.CheckRunIdentityUnderLock(runID, stateDir)
+	if err != nil {
+		return storage.ActiveRunEntry{}, false, err
+	}
+	active := state.FrameworkEnabled && entry.GateEpoch == state.GateEpoch &&
+		(entry.ShutdownStatus == "" || entry.ShutdownStatus == "active")
+	return entry, active, nil
 }
 
 // CheckRunUnderLock validates gate epoch and active-run identity. The caller
@@ -359,6 +446,31 @@ func (m *Manager) CheckRunUnderLock(runID string, epoch uint64, stateDir string)
 	}
 	if entry.ShutdownStatus != "" && entry.ShutdownStatus != "active" {
 		return storage.ActiveRunEntry{}, fmt.Errorf("collaboration run is shutting down: %s", entry.ShutdownStatus)
+	}
+	return entry, nil
+}
+
+// CheckRunIdentityUnderLock validates only the durable run-to-state mapping.
+// It intentionally does not require the machine gate to remain enabled, so a
+// terminal completion that was already executed before disable can still be
+// recorded without granting the run permission to create more work.
+func (m *Manager) CheckRunIdentityUnderLock(runID, stateDir string) (storage.ActiveRunEntry, error) {
+	if strings.TrimSpace(runID) == "" {
+		return storage.ActiveRunEntry{}, errors.New("run_id is required")
+	}
+	if strings.TrimSpace(stateDir) == "" {
+		return storage.ActiveRunEntry{}, errors.New("state_dir is required")
+	}
+	index, err := m.store.LoadActiveRunIndex()
+	if err != nil {
+		return storage.ActiveRunEntry{}, err
+	}
+	entry, ok := index.Runs[runID]
+	if !ok {
+		return storage.ActiveRunEntry{}, errors.New("collaboration run is not active")
+	}
+	if filepath.Clean(entry.StateDir) != filepath.Clean(stateDir) {
+		return storage.ActiveRunEntry{}, errors.New("collaboration run does not match this state-dir")
 	}
 	return entry, nil
 }

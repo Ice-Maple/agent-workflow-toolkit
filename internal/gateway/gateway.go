@@ -261,19 +261,19 @@ type Gateway struct {
 func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (CreateCollaborationRunResult, error) {
 	coord := g.coordination
 	if coord == nil {
-		var err error
-		coord, err = coordination.NewWithStore(g.store, controlActionLeaseDuration)
-		if err != nil {
-			return CreateCollaborationRunResult{}, err
-		}
+		return CreateCollaborationRunResult{}, fail("coordination_required", "collaboration requests require an independent machine coordination root", nil)
+	}
+	if !g.coordinationLocked {
+		return CreateCollaborationRunResult{}, fail("coordination_lock_required", "collaboration admission must be executed through the coordination facade", nil)
 	}
 	if input.GateEpoch == 0 {
 		return CreateCollaborationRunResult{}, fail("gate_epoch_required", "framework collaboration requires the current machine gate epoch", nil)
 	}
-	if !g.coordinationLocked {
-		if err := coord.Admission(input.GateEpoch); err != nil {
-			return CreateCollaborationRunResult{}, fail("collaboration_gate_rejected", err.Error(), nil)
-		}
+	if err := coord.CheckGateUnderLock(input.GateEpoch); err != nil {
+		return CreateCollaborationRunResult{}, fail("collaboration_gate_rejected", err.Error(), nil)
+	}
+	if canonicalPathForCompare(input.StateDir) != canonicalPathForCompare(g.store.Root()) {
+		return CreateCollaborationRunResult{}, fail("state_dir_mismatch", "collaboration state_dir must match the locked business state-dir", nil)
 	}
 	state, err := g.store.Load(input.TaskID)
 	if err != nil {
@@ -303,6 +303,14 @@ func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (Cre
 	if canonical := canonicalPathForCompare(input.Workspace); canonical != canonicalPathForCompare(state.Task.Workspace) {
 		return CreateCollaborationRunResult{}, fail("workspace_mismatch", "collaboration workspace does not match task workspace", nil)
 	}
+	normalizedPlan := input.Plan
+	normalizedPlan.Steps = append([]orchestration.CollaborationStepSpec(nil), input.Plan.Steps...)
+	for index := range normalizedPlan.Steps {
+		if len(normalizedPlan.Steps[index].After) == 0 && index > 0 {
+			normalizedPlan.Steps[index].After = []string{normalizedPlan.Steps[index-1].ID}
+		}
+	}
+	input.Plan = normalizedPlan
 	if err := validateCollaborationPlan(input.Plan); err != nil {
 		return CreateCollaborationRunResult{}, fail("invalid_collaboration_plan", err.Error(), nil)
 	}
@@ -318,11 +326,15 @@ func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (Cre
 		if count == 0 {
 			count = 1
 		}
+		dependencies := append([]string(nil), spec.After...)
+		if len(dependencies) == 0 && len(stepRuns) > 0 {
+			dependencies = []string{stepRuns[len(stepRuns)-1].StepID}
+		}
 		status := orchestration.StepRunWaiting
-		if len(spec.After) == 0 {
+		if len(dependencies) == 0 {
 			status = orchestration.StepRunReady
 		}
-		stepRun := orchestration.StepRun{ID: orchestration.NewID("step"), RunID: run.ID, StepID: spec.ID, After: append([]string(nil), spec.After...), RequestedCount: count, Status: status, CreatedAt: now, UpdatedAt: now}
+		stepRun := orchestration.StepRun{ID: orchestration.NewID("step"), RunID: run.ID, StepID: spec.ID, After: dependencies, RequestedCount: count, Status: status, CreatedAt: now, UpdatedAt: now}
 		state.StepRuns[stepRun.ID] = stepRun
 		stepRuns = append(stepRuns, stepRun)
 		for index := 0; index < count; index++ {
@@ -346,22 +358,13 @@ func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (Cre
 		if err := coord.RegisterRunUnderLock(entry); err != nil {
 			return CreateCollaborationRunResult{}, fail("collaboration_run_registration_failed", err.Error(), nil)
 		}
-	} else if _, err := coord.CreateRun(entry); err != nil {
-		return CreateCollaborationRunResult{}, fail("collaboration_run_registration_failed", err.Error(), nil)
 	}
 	return CreateCollaborationRunResult{Run: run, StepRuns: stepRuns, Instances: instances}, nil
 }
 
 func (g *Gateway) RecordCollaborationTechnicalRelease(input TechnicalReleaseInput) (TechnicalReleaseResult, error) {
-	if g.coordination != nil {
-		if strings.TrimSpace(input.RunID) == "" {
-			return TechnicalReleaseResult{}, fail("run_required", "run_id is required", nil)
-		}
-		// The operation itself resolves and validates the run-scoped authority
-		// from core state. It never accepts an arbitrary authority string.
-		if _, ok := g.findRun(input.RunID); !ok {
-			return TechnicalReleaseResult{}, fail("unknown_collaboration_run", "collaboration run was not found", nil)
-		}
+	if strings.TrimSpace(input.RunID) == "" {
+		return TechnicalReleaseResult{}, fail("run_required", "run_id is required", nil)
 	}
 	state, err := g.findState(func(candidate storage.State) bool {
 		_, ok := candidate.CollaborationRuns[input.RunID]
@@ -373,6 +376,15 @@ func (g *Gateway) RecordCollaborationTechnicalRelease(input TechnicalReleaseInpu
 	run, ok := state.CollaborationRuns[input.RunID]
 	if !ok || run.Status != orchestration.CollaborationRunActive {
 		return TechnicalReleaseResult{}, fail("collaboration_run_not_active", "collaboration run is not active", nil)
+	}
+	if err := g.checkCollaborationRunAdmission(run.ID, run.GateEpoch); err != nil {
+		return TechnicalReleaseResult{}, err
+	}
+	if state.Task.CurrentRevisionID != run.RevisionID || run.PlanHash != hashJSON(run.Plan) {
+		return TechnicalReleaseResult{}, fail("collaboration_plan_changed", "the task revision or frozen collaboration plan no longer matches", nil)
+	}
+	if strings.TrimSpace(input.Reason) == "" {
+		return TechnicalReleaseResult{}, fail("technical_release_reason_required", "reason is required", nil)
 	}
 	if strings.TrimSpace(input.InstanceID) == "" {
 		return TechnicalReleaseResult{}, fail("instance_required", "instance_id is required", nil)
@@ -426,12 +438,46 @@ func (g *Gateway) RecordCollaborationTechnicalRelease(input TechnicalReleaseInpu
 		state.StepRuns[stepRun.ID] = stepRun
 	}
 	ready := readyInstances(state, run.ID)
+	if !hasAwaitingHumanCheckpoint(state) {
+		state.Task.Status = orchestration.TaskActive
+	}
 	event := orchestration.NewEvent(state.Task.ID, "collaboration.technical_release", map[string]any{"run_id": run.ID, "instance_id": instance.ID, "technical_release_id": release.ID, "authority_id": release.AuthorityID})
 	event.NodeID, event.AttemptID = node.ID, attempt.ID
 	if err := g.saveEvents(state, event); err != nil {
 		return TechnicalReleaseResult{}, err
 	}
+	if runComplete(state, run.ID) {
+		run.Status = orchestration.CollaborationRunCompleted
+		run.UpdatedAt = now
+		state.CollaborationRuns[run.ID] = run
+		if err := g.saveState(state); err != nil {
+			return TechnicalReleaseResult{}, err
+		}
+		if err := g.coordination.RemoveRunUnderLock(run.ID); err != nil {
+			return TechnicalReleaseResult{}, err
+		}
+	} else if err := g.updateCollaborationIndex(run.ID, "", "", "", 0, true); err != nil {
+		return TechnicalReleaseResult{}, err
+	}
 	return TechnicalReleaseResult{Release: release, Instance: instance, NextReady: ready}, nil
+}
+
+func hasAwaitingHumanCheckpoint(state storage.State) bool {
+	for _, node := range state.Nodes {
+		if node.Status == orchestration.NodeAwaitingHumanDecision {
+			return true
+		}
+	}
+	return false
+}
+
+func runComplete(state storage.State, runID string) bool {
+	for _, instance := range state.InstanceRuns {
+		if instance.RunID == runID && instance.Status != orchestration.InstanceTechnicallyDone {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *Gateway) findRun(runID string) (orchestration.CollaborationRun, bool) {
@@ -567,16 +613,84 @@ func readyInstances(state storage.State, runID string) []orchestration.InstanceR
 }
 
 func (g *Gateway) prepareCollaborationGate(epoch uint64) error {
-	coord, err := coordination.NewWithStore(g.store, controlActionLeaseDuration)
+	if g.coordination == nil {
+		return fail("coordination_required", "collaboration requests require an independent machine coordination root", nil)
+	}
+	if !g.coordinationLocked {
+		return fail("coordination_lock_required", "collaboration admission must be executed through the coordination facade", nil)
+	}
+	if err := g.coordination.CheckGateUnderLock(epoch); err != nil {
+		return fail("collaboration_gate_rejected", err.Error(), nil)
+	}
+	return nil
+}
+
+func (g *Gateway) checkCollaborationRunAdmission(runID string, epoch uint64) error {
+	if g.coordination == nil {
+		return fail("coordination_required", "collaboration requests require an independent machine coordination root", nil)
+	}
+	if !g.coordinationLocked {
+		return fail("coordination_lock_required", "collaboration admission must be executed through the coordination facade", nil)
+	}
+	if _, err := g.coordination.CheckRunUnderLock(runID, epoch, g.store.Root()); err != nil {
+		return fail("collaboration_gate_rejected", err.Error(), nil)
+	}
+	return nil
+}
+
+func (g *Gateway) checkCollaborationRunIdentity(runID string) error {
+	if g.coordination == nil {
+		return fail("coordination_required", "collaboration requests require an independent machine coordination root", nil)
+	}
+	if !g.coordinationLocked {
+		return fail("coordination_lock_required", "collaboration requests must be executed through the coordination facade", nil)
+	}
+	if _, err := g.coordination.CheckRunIdentityUnderLock(runID, g.store.Root()); err != nil {
+		return fail("collaboration_admission_rejected", err.Error(), nil)
+	}
+	return nil
+}
+
+func (g *Gateway) collaborationAttemptState(attemptID string) (found, active bool, err error) {
+	if g.coordination == nil {
+		return false, true, nil
+	}
+	if !g.coordinationLocked {
+		return false, false, fail("coordination_lock_required", "collaboration action handling must be executed through the coordination facade", nil)
+	}
+	entry, found, active, err := g.coordination.AttemptStatusUnderLock(attemptID)
+	if err != nil {
+		return false, false, fail("collaboration_admission_rejected", err.Error(), nil)
+	}
+	if found && canonicalPathForCompare(entry.StateDir) != canonicalPathForCompare(g.store.Root()) {
+		return false, false, fail("state_dir_mismatch", "indexed collaboration Attempt does not belong to this state-dir", nil)
+	}
+	return found, active, nil
+}
+
+func (g *Gateway) updateCollaborationIndex(runID string, attemptID, instanceID, actionID string, sequence int, clearAttempt bool) error {
+	if g.coordination == nil || !g.coordinationLocked || strings.TrimSpace(runID) == "" {
+		return nil
+	}
+	entry, found, err := g.coordination.GetRunUnderLock(runID)
 	if err != nil {
 		return err
 	}
-	if !g.coordinationLocked {
-		if err := coord.Admission(epoch); err != nil {
-			return fail("collaboration_gate_rejected", err.Error(), nil)
-		}
+	if !found {
+		return errors.New("collaboration run is not active")
 	}
-	return nil
+	if clearAttempt {
+		entry.AttemptID = ""
+		entry.InstanceID = ""
+	} else {
+		entry.AttemptID = attemptID
+		entry.InstanceID = instanceID
+	}
+	if actionID != "" {
+		entry.LastActionID = actionID
+		entry.LastActionSequence = sequence
+	}
+	return g.coordination.UpdateRunUnderLock(entry)
 }
 
 func New(store *storage.Store, config policy.Config) (*Gateway, error) {
@@ -930,7 +1044,7 @@ func (g *Gateway) PrepareAttempt(input PrepareAttemptInput) (LaunchDecision, err
 		if instance.Status != orchestration.InstanceReady {
 			return LaunchDecision{}, fail("collaboration_instance_not_ready", "collaboration instance is not ready", nil)
 		}
-		if err := g.prepareCollaborationGate(input.GateEpoch); err != nil {
+		if err := g.checkCollaborationRunAdmission(input.CollaborationRunID, input.GateEpoch); err != nil {
 			return LaunchDecision{}, err
 		}
 	}
@@ -969,6 +1083,9 @@ func (g *Gateway) PrepareAttempt(input PrepareAttemptInput) (LaunchDecision, err
 		state.InstanceRuns[input.InstanceRunID] = instance
 		state.CollaborationRuns[input.CollaborationRunID] = state.CollaborationRuns[input.CollaborationRunID]
 		if err := g.saveState(state); err != nil {
+			return LaunchDecision{}, err
+		}
+		if err := g.updateCollaborationIndex(input.CollaborationRunID, launch.Attempt.ID, input.InstanceRunID, launch.LaunchAction.ID, launch.LaunchAction.Sequence, false); err != nil {
 			return LaunchDecision{}, err
 		}
 	}
@@ -1088,6 +1205,10 @@ func (g *Gateway) prepareAttempt(state storage.State, node orchestration.Workflo
 }
 
 func (g *Gateway) PollHostActions(input PollHostActionsInput) (HostActionBatch, error) {
+	indexed, active, err := g.collaborationAttemptState(input.AttemptID)
+	if err != nil {
+		return HostActionBatch{}, err
+	}
 	state, attempt, err := g.loadAttempt(input.AttemptID)
 	if err != nil {
 		return HostActionBatch{}, err
@@ -1107,6 +1228,9 @@ func (g *Gateway) PollHostActions(input PollHostActionsInput) (HostActionBatch, 
 			continue
 		}
 		if attempt.Status == orchestration.AttemptCancelRequested && action.Kind != orchestration.ActionCancelHost {
+			continue
+		}
+		if indexed && !active && action.Kind == orchestration.ActionLaunch {
 			continue
 		}
 		if !knownActionKind(action.Kind) {
@@ -1140,6 +1264,10 @@ func (g *Gateway) PollHostActions(input PollHostActionsInput) (HostActionBatch, 
 }
 
 func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (ActionReceipt, error) {
+	indexed, active, err := g.collaborationAttemptState(input.AttemptID)
+	if err != nil {
+		return ActionReceipt{}, err
+	}
 	state, attempt, err := g.loadAttempt(input.AttemptID)
 	if err != nil {
 		return ActionReceipt{}, err
@@ -1268,6 +1396,11 @@ func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (Act
 			attempt.Status = orchestration.AttemptFailed
 		} else if input.Result.Terminal {
 			attempt.Status = orchestration.AttemptCompleted
+		} else if indexed && !active {
+			attempt.Status = orchestration.AttemptCancelRequested
+			cancel := g.issueAction(state, attempt, orchestration.ActionCancelHost, map[string]any{"provider_handle": attempt.ProviderHandle, "reason": "framework_disabled"}, action.ControllerInstanceID)
+			state.Actions[cancel.ID] = cancel
+			next = append(next, cancel)
 		} else {
 			attempt.Status = orchestration.AttemptRunning
 			observe := g.issueAction(state, attempt, orchestration.ActionObserve, map[string]any{"provider_handle": attempt.ProviderHandle}, action.ControllerInstanceID)
@@ -1282,6 +1415,11 @@ func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (Act
 			attempt.Status = orchestration.AttemptFailed
 		} else if input.Result.Terminal {
 			attempt.Status = orchestration.AttemptCompleted
+		} else if indexed && !active {
+			attempt.Status = orchestration.AttemptCancelRequested
+			cancel := g.issueAction(state, attempt, orchestration.ActionCancelHost, map[string]any{"provider_handle": attempt.ProviderHandle, "reason": "framework_disabled"}, action.ControllerInstanceID)
+			state.Actions[cancel.ID] = cancel
+			next = append(next, cancel)
 		} else {
 			attempt.Status = orchestration.AttemptRunning
 		}
@@ -1320,7 +1458,35 @@ func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (Act
 	if err := g.saveEvents(state, event); err != nil {
 		return ActionReceipt{}, err
 	}
+	if indexed {
+		runID := collaborationRunIDForAttempt(state, attempt.ID)
+		if runID != "" {
+			last := action
+			clear := attempt.Status == orchestration.AttemptCompleted || attempt.Status == orchestration.AttemptFailed || attempt.Status == orchestration.AttemptIncomplete || attempt.Status == orchestration.AttemptTimedOut || attempt.Status == orchestration.AttemptCancelled || attempt.Status == orchestration.AttemptCancelUnconfirmed || attempt.Status == orchestration.AttemptContaminated
+			if err := g.updateCollaborationIndex(runID, attempt.ID, instanceIDForAttempt(state, attempt.ID), last.ID, last.Sequence, clear); err != nil {
+				return ActionReceipt{}, err
+			}
+		}
+	}
 	return ActionReceipt{Action: action, Attempt: attempt, Next: next}, nil
+}
+
+func collaborationRunIDForAttempt(state storage.State, attemptID string) string {
+	for _, instance := range state.InstanceRuns {
+		if instance.AttemptID == attemptID {
+			return instance.RunID
+		}
+	}
+	return ""
+}
+
+func instanceIDForAttempt(state storage.State, attemptID string) string {
+	for _, instance := range state.InstanceRuns {
+		if instance.AttemptID == attemptID {
+			return instance.ID
+		}
+	}
+	return ""
 }
 
 func (g *Gateway) BindProviderHandle(input BindProviderHandleInput) (map[string]any, error) {
@@ -1412,6 +1578,13 @@ func (g *Gateway) RequestCompletion(input CompletionInput) (CompletionResult, er
 		instance, ok := state.InstanceRuns[input.InstanceRunID]
 		if !ok || instance.RunID != input.CollaborationRunID || instance.AttemptID != attempt.ID {
 			return CompletionResult{}, fail("collaboration_admission_rejected", "completion linkage does not match the Attempt", nil)
+		}
+		run, ok := state.CollaborationRuns[input.CollaborationRunID]
+		if !ok || input.GateEpoch == 0 || run.GateEpoch != input.GateEpoch {
+			return CompletionResult{}, fail("collaboration_admission_rejected", "completion gate epoch does not match the frozen collaboration run", nil)
+		}
+		if err := g.checkCollaborationRunIdentity(run.ID); err != nil {
+			return CompletionResult{}, err
 		}
 	}
 	decision := orchestration.CompletionDecision{ID: orchestration.NewID("completion"), AttemptID: attempt.ID, Status: attempt.Status, CreatedAt: time.Now().UTC()}
