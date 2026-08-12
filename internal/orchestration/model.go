@@ -79,6 +79,7 @@ const (
 type Binding struct {
 	Role         string   `json:"role"`
 	Adapter      string   `json:"adapter"`
+	ProfileID    string   `json:"profile_id,omitempty"`
 	Model        string   `json:"model"`
 	Reasoning    string   `json:"reasoning"`
 	Permission   string   `json:"permission"`
@@ -104,15 +105,20 @@ type RoleRoute struct {
 }
 
 type AdapterProfile struct {
-	ID            string `json:"id"`
-	Adapter       string `json:"adapter"`
-	Executable    string `json:"executable,omitempty"`
-	Trust         string `json:"trust,omitempty"`
-	Sandbox       string `json:"sandbox,omitempty"`
-	Approval      string `json:"approval,omitempty"`
-	MCPConfigPath string `json:"mcp_config_path,omitempty"`
-	ProviderRef   string `json:"provider_ref,omitempty"`
-	ProfileHash   string `json:"profile_hash"`
+	ID              string `json:"id"`
+	Adapter         string `json:"adapter"`
+	Executable      string `json:"executable,omitempty"`
+	Trust           string `json:"trust,omitempty"`
+	Mode            string `json:"mode,omitempty"`
+	Sandbox         string `json:"sandbox,omitempty"`
+	Approval        string `json:"approval,omitempty"`
+	MCPConfigPath   string `json:"mcp_config_path,omitempty"`
+	ProviderRef     string `json:"provider_ref,omitempty"`
+	ProviderBaseURL string `json:"provider_base_url,omitempty"`
+	ProviderWireAPI string `json:"provider_wire_api,omitempty"`
+	ProviderAuth    bool   `json:"provider_auth,omitempty"`
+	EnvironmentRef  string `json:"environment_ref,omitempty"`
+	ProfileHash     string `json:"profile_hash"`
 }
 
 type ExpectedOutput struct {
@@ -354,6 +360,7 @@ type InstanceRun struct {
 	StepRunID          string            `json:"step_run_id"`
 	StepID             string            `json:"step_id"`
 	Role               string            `json:"role"`
+	RolePromptHash     string            `json:"role_prompt_hash,omitempty"`
 	NodeID             string            `json:"node_id,omitempty"`
 	AttemptID          string            `json:"attempt_id,omitempty"`
 	Binding            Binding           `json:"binding,omitempty"`
@@ -393,6 +400,20 @@ func HashParameters(parameters map[string]any) string {
 		parameters = map[string]any{}
 	}
 	raw, _ := json.Marshal(parameters)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// HashAdapterProfile hashes the machine-local profile without including its
+// self-reported hash. The value is used by the public bridge to reject a
+// profile that changed after preflight.
+func HashAdapterProfile(profile AdapterProfile) string {
+	profile.ProfileHash = ""
+	raw, _ := json.Marshal(profile)
+	return hashBytes(raw)
+}
+
+func hashBytes(raw []byte) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }

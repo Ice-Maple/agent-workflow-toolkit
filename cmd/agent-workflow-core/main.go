@@ -38,9 +38,13 @@ func main() {
 	statusMode := flag.Bool("status", false, "show machine-local collaboration status")
 	enableMode := flag.Bool("enable", false, "enable the machine-local collaboration framework gate")
 	disableMode := flag.Bool("disable", false, "disable the machine-local collaboration framework gate")
+	setWorkspaceMode := flag.Bool("set-workspace-mode", false, "set the mode for one canonical workspace")
+	workspace := flag.String("workspace", "", "canonical workspace used by --status or --set-workspace-mode")
+	workspaceMode := flag.String("workspace-mode", "", "workspace mode: framework, direct or single")
 	stateDir := flag.String("state-dir", "", "directory for task state and request receipts")
 	coordinationDir := flag.String("coordination-dir", "", "machine-local collaboration coordination directory")
-	policyFile := flag.String("policy-file", "", "JSON policy file containing registered bindings")
+	policyFile := flag.String("policy-file", "", "JSON policy file containing registered bindings and machine-local routes")
+	rolesManifest := flag.String("roles-manifest", "", "Workflow/project roles.yaml to verify Role Prompt identities")
 	lockTimeout := flag.Duration("lock-timeout", 5*time.Second, "maximum time to wait for exclusive state-dir access")
 	flag.Parse()
 
@@ -49,15 +53,21 @@ func main() {
 		fmt.Printf("agent-workflow-core version=%s protocol=%d maturity=%s revision=%s dirty=%t\n", metadata.Version, metadata.ProtocolMajor, metadata.Maturity, metadata.Revision, metadata.Dirty)
 		return
 	}
-	controlMode := *statusMode || *enableMode || *disableMode
+	controlMode := *statusMode || *enableMode || *disableMode || *setWorkspaceMode
 	if !*validateRequest && !*gatewayMode && !controlMode {
-		fmt.Fprintln(os.Stderr, "usage: agent-workflow-core --version | --validate-request | --gateway [--state-dir DIR] [--coordination-dir DIR] [--policy-file FILE] | --status | --enable | --disable")
+		fmt.Fprintln(os.Stderr, "usage: agent-workflow-core --version | --validate-request | --gateway [--state-dir DIR] [--coordination-dir DIR] [--policy-file FILE] [--roles-manifest FILE] | --status | --enable | --disable | --set-workspace-mode --workspace DIR --workspace-mode MODE")
 		os.Exit(2)
 	}
 
 	if controlMode {
-		if *statusMode && (*enableMode || *disableMode) || *enableMode && *disableMode {
-			fmt.Fprintln(os.Stderr, "--status, --enable and --disable are mutually exclusive")
+		selected := 0
+		for _, selectedMode := range []bool{*statusMode, *enableMode, *disableMode, *setWorkspaceMode} {
+			if selectedMode {
+				selected++
+			}
+		}
+		if selected != 1 {
+			fmt.Fprintln(os.Stderr, "exactly one of --status, --enable, --disable and --set-workspace-mode is required")
 			os.Exit(2)
 		}
 		root, err := resolveCoordinationRoot(*coordinationDir)
@@ -73,11 +83,17 @@ func main() {
 		var output any
 		switch {
 		case *statusMode:
-			output, err = manager.Status("")
+			output, err = manager.Status(*workspace)
 		case *enableMode:
 			output, err = manager.SetFrameworkEnabled(true)
 		case *disableMode:
 			output, err = manager.Disable()
+		case *setWorkspaceMode:
+			if strings.TrimSpace(*workspace) == "" || strings.TrimSpace(*workspaceMode) == "" {
+				fmt.Fprintln(os.Stderr, "--set-workspace-mode requires --workspace and --workspace-mode")
+				os.Exit(2)
+			}
+			output, err = manager.SetWorkspaceMode(*workspace, *workspaceMode)
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -125,15 +141,17 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	coordRoot, err := resolveCoordinationRoot(*coordinationDir)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	coordManager, err := coordination.New(coordRoot, *lockTimeout)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if strings.TrimSpace(*rolesManifest) != "" {
+		registryConfig, loadErr := policy.LoadRoleManifest(*rolesManifest)
+		if loadErr != nil {
+			fmt.Fprintln(os.Stderr, loadErr)
+			os.Exit(1)
+		}
+		config.RoleDefinitions = registryConfig.RoleDefinitions
+		if validateErr := config.Validate(); validateErr != nil {
+			fmt.Fprintln(os.Stderr, validateErr)
+			os.Exit(1)
+		}
 	}
 	collaborationRequest, stateDirForLock, runID, gateEpoch, attemptID, classifyErr := classifyCollaborationRequest(request)
 	if classifyErr != nil {
@@ -141,6 +159,16 @@ func main() {
 		return
 	}
 	if collaborationRequest {
+		coordRoot, coordErr := resolveCoordinationRoot(*coordinationDir)
+		if coordErr != nil {
+			fmt.Fprintln(os.Stderr, coordErr)
+			os.Exit(1)
+		}
+		coordManager, coordErr := coordination.New(coordRoot, *lockTimeout)
+		if coordErr != nil {
+			fmt.Fprintln(os.Stderr, coordErr)
+			os.Exit(1)
+		}
 		// The collaboration facade owns the complete lock order. It must not be
 		// composed from the legacy state-dir-only one-shot path.
 		var locks *coordination.LockSet

@@ -85,6 +85,8 @@ type PrepareAttemptInput struct {
 	NodeID               string                 `json:"node_id"`
 	ControllerInstanceID string                 `json:"controller_instance_id"`
 	Binding              *orchestration.Binding `json:"binding,omitempty"`
+	DispatchPrompt       string                 `json:"dispatch_prompt,omitempty"`
+	RolePromptHash       string                 `json:"role_prompt_hash,omitempty"`
 	PreviousAttemptID    string                 `json:"previous_attempt_id,omitempty"`
 	CollaborationRunID   string                 `json:"collaboration_run_id,omitempty"`
 	InstanceRunID        string                 `json:"instance_run_id,omitempty"`
@@ -184,7 +186,8 @@ type ResolveRoleInput struct {
 }
 
 type ResolveRoleResult struct {
-	Binding orchestration.Binding `json:"binding"`
+	Binding    orchestration.Binding        `json:"binding"`
+	Definition orchestration.RoleDefinition `json:"role_definition"`
 }
 
 type TechnicalReleaseInput struct {
@@ -305,6 +308,14 @@ func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (Cre
 	}
 	normalizedPlan := input.Plan
 	normalizedPlan.Steps = append([]orchestration.CollaborationStepSpec(nil), input.Plan.Steps...)
+	rolePromptHashes := copyStringMap(input.RolePromptHashes)
+	if len(rolePromptHashes) == 0 {
+		rolePromptHashes = copyStringMap(input.Plan.RolePromptHashes)
+	}
+	if len(input.RolePromptHashes) > 0 && len(input.Plan.RolePromptHashes) > 0 && !equalStringMaps(input.RolePromptHashes, input.Plan.RolePromptHashes) {
+		return CreateCollaborationRunResult{}, fail("role_prompt_hash_mismatch", "request and plan Role Prompt hashes differ", nil)
+	}
+	normalizedPlan.RolePromptHashes = rolePromptHashes
 	for index := range normalizedPlan.Steps {
 		if len(normalizedPlan.Steps[index].After) == 0 && index > 0 {
 			normalizedPlan.Steps[index].After = []string{normalizedPlan.Steps[index-1].ID}
@@ -313,6 +324,9 @@ func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (Cre
 	input.Plan = normalizedPlan
 	if err := validateCollaborationPlan(input.Plan); err != nil {
 		return CreateCollaborationRunResult{}, fail("invalid_collaboration_plan", err.Error(), nil)
+	}
+	if err := g.validateCollaborationRoles(state.Task.Workspace, input.Plan); err != nil {
+		return CreateCollaborationRunResult{}, err
 	}
 	planHash := hashJSON(input.Plan)
 	runID := orchestration.NewID("run")
@@ -338,7 +352,7 @@ func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (Cre
 		state.StepRuns[stepRun.ID] = stepRun
 		stepRuns = append(stepRuns, stepRun)
 		for index := 0; index < count; index++ {
-			instance := orchestration.InstanceRun{ID: orchestration.NewID("instance"), RunID: run.ID, StepRunID: stepRun.ID, StepID: spec.ID, Role: spec.Role, Status: orchestration.InstanceWaiting, CreatedAt: now, UpdatedAt: now}
+			instance := orchestration.InstanceRun{ID: orchestration.NewID("instance"), RunID: run.ID, StepRunID: stepRun.ID, StepID: spec.ID, Role: spec.Role, RolePromptHash: input.Plan.RolePromptHashes[spec.Role], Status: orchestration.InstanceWaiting, CreatedAt: now, UpdatedAt: now}
 			if status == orchestration.StepRunReady {
 				instance.Status = orchestration.InstanceReady
 			}
@@ -552,9 +566,51 @@ func validateCollaborationPlan(plan orchestration.CollaborationPlan) error {
 	return nil
 }
 
+func (g *Gateway) validateCollaborationRoles(workspace string, plan orchestration.CollaborationPlan) error {
+	if len(g.config.RoleDefinitions) == 0 {
+		return fail("role_registry_required", "framework collaboration requires a verified Role Registry", nil)
+	}
+	if len(plan.RolePromptHashes) == 0 {
+		return fail("role_prompt_hashes_required", "framework collaboration requires a Role Prompt hash for every referenced role", nil)
+	}
+	seen := make(map[string]struct{}, len(plan.Steps))
+	for _, step := range plan.Steps {
+		definition, err := g.config.RoleDefinition(step.Role)
+		if err != nil {
+			return fail("role_registry_rejected", err.Error(), map[string]any{"role": step.Role})
+		}
+		if _, err := g.config.ResolveRole(step.Role, workspace); err != nil {
+			return fail("role_route_missing", err.Error(), map[string]any{"role": step.Role})
+		}
+		expected := strings.TrimSpace(plan.RolePromptHashes[step.Role])
+		if expected == "" || !strings.EqualFold(expected, definition.PromptHash) {
+			return fail("role_prompt_hash_mismatch", "the plan Role Prompt hash does not match the verified registry content", map[string]any{"role": step.Role})
+		}
+		seen[step.Role] = struct{}{}
+	}
+	for role := range plan.RolePromptHashes {
+		if _, ok := seen[role]; !ok {
+			return fail("role_prompt_hash_unreferenced", "the plan contains a hash for an unreferenced role", map[string]any{"role": role})
+		}
+	}
+	return nil
+}
+
 func hashJSON(value any) string {
 	raw, _ := json.Marshal(value)
 	return hashBytes(raw)
+}
+
+func equalStringMaps(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func dependenciesReleased(state storage.State, runID string, dependencies []string) bool {
@@ -915,7 +971,11 @@ func (g *Gateway) ResolveRole(input ResolveRoleInput) (ResolveRoleResult, error)
 	if err != nil {
 		return ResolveRoleResult{}, fail("role_route_missing", err.Error(), nil)
 	}
-	return ResolveRoleResult{Binding: binding}, nil
+	definition, err := g.config.RoleDefinition(input.Role)
+	if err != nil {
+		return ResolveRoleResult{}, fail("role_registry_rejected", err.Error(), nil)
+	}
+	return ResolveRoleResult{Binding: binding, Definition: definition}, nil
 }
 
 func (g *Gateway) CreateTask(input CreateTaskInput) (CreateTaskResult, error) {
@@ -1032,6 +1092,12 @@ func (g *Gateway) PrepareAttempt(input PrepareAttemptInput) (LaunchDecision, err
 	if input.Binding != nil && !sameBinding(*input.Binding, *node.ApprovedBinding) {
 		return LaunchDecision{}, fail("binding_mismatch", "approved binding cannot be changed during prepareAttempt", nil)
 	}
+	if input.RolePromptHash != "" {
+		definition, definitionErr := g.config.RoleDefinition(node.Role)
+		if definitionErr != nil || !strings.EqualFold(strings.TrimSpace(input.RolePromptHash), definition.PromptHash) {
+			return LaunchDecision{}, fail("role_prompt_hash_mismatch", "Attempt Role Prompt hash does not match the registered Role", nil)
+		}
+	}
 	if input.CollaborationRunID != "" || input.InstanceRunID != "" || input.GateEpoch != 0 {
 		if input.CollaborationRunID == "" || input.InstanceRunID == "" || input.GateEpoch == 0 {
 			return LaunchDecision{}, fail("collaboration_linkage_required", "collaboration attempt admission requires run_id, instance_id and gate_epoch", nil)
@@ -1043,6 +1109,12 @@ func (g *Gateway) PrepareAttempt(input PrepareAttemptInput) (LaunchDecision, err
 		}
 		if instance.Status != orchestration.InstanceReady {
 			return LaunchDecision{}, fail("collaboration_instance_not_ready", "collaboration instance is not ready", nil)
+		}
+		if input.RolePromptHash == "" {
+			input.RolePromptHash = instance.RolePromptHash
+		}
+		if input.RolePromptHash == "" || !strings.EqualFold(input.RolePromptHash, run.RolePromptHashes[instance.Role]) {
+			return LaunchDecision{}, fail("role_prompt_hash_mismatch", "collaboration Attempt must use the hash frozen by the run", nil)
 		}
 		if err := g.checkCollaborationRunAdmission(input.CollaborationRunID, input.GateEpoch); err != nil {
 			return LaunchDecision{}, err
@@ -1069,12 +1141,15 @@ func (g *Gateway) PrepareAttempt(input PrepareAttemptInput) (LaunchDecision, err
 	} else if hasAnyAttemptForNode(state, node.ID, node.RevisionID) {
 		return LaunchDecision{}, fail("retry_lineage_required", "a subsequent Attempt must reference its predecessor", nil)
 	}
-	launch, err := g.prepareAttempt(state, node, *node.ApprovedBinding, node.PreflightMCPIsolation, input.ControllerInstanceID, retryOf, "", "attempt.prepared")
+	launch, err := g.prepareAttempt(state, node, *node.ApprovedBinding, node.PreflightMCPIsolation, input.ControllerInstanceID, input.DispatchPrompt, input.RolePromptHash, retryOf, "", "attempt.prepared")
 	if err != nil {
 		return LaunchDecision{}, err
 	}
 	if input.InstanceRunID != "" {
 		instance := state.InstanceRuns[input.InstanceRunID]
+		if instance.RolePromptHash != "" && input.RolePromptHash != "" && !strings.EqualFold(instance.RolePromptHash, input.RolePromptHash) {
+			return LaunchDecision{}, fail("role_prompt_hash_mismatch", "instance Role Prompt hash cannot change during Attempt admission", nil)
+		}
 		instance.NodeID = launch.Attempt.NodeID
 		instance.AttemptID = launch.Attempt.ID
 		instance.Binding = launch.Attempt.Binding
@@ -1121,7 +1196,7 @@ func (g *Gateway) PrepareRetryAttempt(input RetryAttemptInput) (LaunchDecision, 
 	if !g.config.RetryAllowed(previous, input.ErrorCode, retriesUsed) {
 		return LaunchDecision{}, fail("retry_not_allowed", "recorded attempt evidence does not satisfy retry policy", map[string]any{"error_code": input.ErrorCode, "retries_already_used": retriesUsed})
 	}
-	return g.prepareAttempt(state, node, *node.ApprovedBinding, node.PreflightMCPIsolation, input.ControllerInstanceID, previous.ID, "", "attempt.retry_prepared")
+	return g.prepareAttempt(state, node, *node.ApprovedBinding, node.PreflightMCPIsolation, input.ControllerInstanceID, "", "", previous.ID, "", "attempt.retry_prepared")
 }
 
 // PrepareFallbackAttempt creates a new Attempt only after the policy has
@@ -1169,10 +1244,10 @@ func (g *Gateway) PrepareFallbackAttempt(input FallbackAttemptInput) (LaunchDeci
 	if decision.Status != "passed" {
 		return LaunchDecision{}, fail("fallback_not_allowed", decision.Reason, map[string]any{"code": decision.Code, "status": decision.Status})
 	}
-	return g.prepareAttempt(state, node, preflight.Binding, preflight.MCPIsolation, input.ControllerInstanceID, "", previous.ID, "attempt.fallback_prepared")
+	return g.prepareAttempt(state, node, preflight.Binding, preflight.MCPIsolation, input.ControllerInstanceID, "", "", "", previous.ID, "attempt.fallback_prepared")
 }
 
-func (g *Gateway) prepareAttempt(state storage.State, node orchestration.WorkflowNode, binding orchestration.Binding, mcpIsolation, controllerID, retryOf, fallbackOf, eventType string) (LaunchDecision, error) {
+func (g *Gateway) prepareAttempt(state storage.State, node orchestration.WorkflowNode, binding orchestration.Binding, mcpIsolation, controllerID, dispatchPrompt, rolePromptHash, retryOf, fallbackOf, eventType string) (LaunchDecision, error) {
 	for _, existing := range state.Attempts {
 		if existing.NodeID != node.ID || existing.RevisionID != node.RevisionID {
 			continue
@@ -1186,7 +1261,27 @@ func (g *Gateway) prepareAttempt(state storage.State, node orchestration.Workflo
 	attempt := orchestration.Attempt{ID: orchestration.NewID("attempt"), TaskID: state.Task.ID, NodeID: node.ID, RevisionID: node.RevisionID, Status: orchestration.AttemptLaunching, Binding: binding, LaunchNonce: orchestration.NewID("nonce"), SideEffectState: "none", ReadOnlyIsolation: binding.Permission == "read-only", MCPIsolation: selectedMCPIsolation(mcpIsolation), RetryOf: retryOf, FallbackOf: fallbackOf, CreatedAt: now, UpdatedAt: now}
 	attempt.TaskCanary = attempt.TaskID + ":" + attempt.ID + ":" + attempt.LaunchNonce
 	state.Attempts[attempt.ID] = attempt
-	parameters := map[string]any{"task_id": state.Task.ID, "attempt_id": attempt.ID, "launch_nonce": attempt.LaunchNonce, "task_canary": attempt.TaskCanary, "binding": attempt.Binding, "expected_output": node.ExpectedOutput, "mcp_isolation": attempt.MCPIsolation}
+	if definition, definitionErr := g.config.RoleDefinition(node.Role); definitionErr == nil {
+		if rolePromptHash == "" {
+			rolePromptHash = definition.PromptHash
+		}
+	}
+	if dispatchPrompt = strings.TrimSpace(dispatchPrompt); dispatchPrompt == "" {
+		dispatchPrompt = fmt.Sprintf("我将发送当前任务给 %s（%s / %s / reasoning=%s）进行处理。", attempt.Binding.Role, attempt.Binding.Adapter, attempt.Binding.Model, attempt.Binding.Reasoning)
+	}
+	parameters := map[string]any{"task_id": state.Task.ID, "attempt_id": attempt.ID, "launch_nonce": attempt.LaunchNonce, "task_canary": attempt.TaskCanary, "binding": attempt.Binding, "expected_output": node.ExpectedOutput, "mcp_isolation": attempt.MCPIsolation, "dispatch_prompt": dispatchPrompt, "dispatch_prompt_hash": hashBytes([]byte(dispatchPrompt))}
+	if rolePromptHash != "" {
+		parameters["role_prompt_hash"] = rolePromptHash
+	}
+	if definition, definitionErr := g.config.RoleDefinition(node.Role); definitionErr == nil {
+		parameters["role_prompt_path"] = definition.PromptPath
+	}
+	if binding.ProfileID != "" {
+		if profile, ok := g.config.AdapterProfiles[binding.ProfileID]; ok {
+			parameters["adapter_profile_id"] = profile.ID
+			parameters["adapter_profile_hash"] = profile.ProfileHash
+		}
+	}
 	if retryOf != "" {
 		parameters["retry_of"] = retryOf
 	}
@@ -1200,8 +1295,7 @@ func (g *Gateway) prepareAttempt(state storage.State, node orchestration.Workflo
 	if err := g.saveEvents(state, event); err != nil {
 		return LaunchDecision{}, err
 	}
-	prompt := fmt.Sprintf("我将发送当前任务给 %s（%s / %s / reasoning=%s）进行处理。", attempt.Binding.Role, attempt.Binding.Adapter, attempt.Binding.Model, attempt.Binding.Reasoning)
-	return LaunchDecision{Attempt: attempt, LaunchAction: action, DispatchPrompt: prompt}, nil
+	return LaunchDecision{Attempt: attempt, LaunchAction: action, DispatchPrompt: dispatchPrompt}, nil
 }
 
 func (g *Gateway) PollHostActions(input PollHostActionsInput) (HostActionBatch, error) {

@@ -329,6 +329,7 @@ func (s *Store) loadUnlocked(taskID string) (State, error) {
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return State{}, fmt.Errorf("decode task %q: %w", taskID, err)
 	}
+	normalizeStateMaps(&state)
 	if err := validateStateVersion(state); err != nil {
 		return State{}, fmt.Errorf("load task %q: %w", taskID, err)
 	}
@@ -336,6 +337,48 @@ func (s *Store) loadUnlocked(taskID string) (State, error) {
 		return State{}, fmt.Errorf("reconcile task %q events: %w", taskID, err)
 	}
 	return state, nil
+}
+
+// normalizeStateMaps keeps snapshots written before the collaboration
+// projection fields were introduced readable. Missing maps mean "no records"
+// rather than a corrupt execution state.
+func normalizeStateMaps(state *State) {
+	if state.Revisions == nil {
+		state.Revisions = map[string]orchestration.TaskRevision{}
+	}
+	if state.Nodes == nil {
+		state.Nodes = map[string]orchestration.WorkflowNode{}
+	}
+	if state.Attempts == nil {
+		state.Attempts = map[string]orchestration.Attempt{}
+	}
+	if state.Actions == nil {
+		state.Actions = map[string]orchestration.HostAction{}
+	}
+	if state.Completions == nil {
+		state.Completions = map[string]orchestration.CompletionDecision{}
+	}
+	if state.GoalAuthorizations == nil {
+		state.GoalAuthorizations = map[string]orchestration.GoalAuthorization{}
+	}
+	if state.CollaborationRuns == nil {
+		state.CollaborationRuns = map[string]orchestration.CollaborationRun{}
+	}
+	if state.StepRuns == nil {
+		state.StepRuns = map[string]orchestration.StepRun{}
+	}
+	if state.InstanceRuns == nil {
+		state.InstanceRuns = map[string]orchestration.InstanceRun{}
+	}
+	if state.TechnicalReleases == nil {
+		state.TechnicalReleases = map[string]orchestration.CollaborationTechnicalRelease{}
+	}
+	if state.HumanDecisions == nil {
+		state.HumanDecisions = []orchestration.HumanDecision{}
+	}
+	if state.Events == nil {
+		state.Events = []orchestration.Event{}
+	}
 }
 
 // reconcileEventsUnlocked closes the small crash window between the durable

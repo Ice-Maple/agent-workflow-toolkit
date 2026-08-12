@@ -13,11 +13,13 @@ import (
 	"strings"
 
 	"agent-workflow-toolkit/internal/orchestration"
+	"agent-workflow-toolkit/internal/roles"
 )
 
 type Config struct {
 	RegisteredBindings []orchestration.Binding                 `json:"registered_bindings"`
 	RoleRoutes         map[string]orchestration.RoleRoute      `json:"role_routes,omitempty"`
+	RoleDefinitions    map[string]orchestration.RoleDefinition `json:"role_definitions,omitempty"`
 	AdapterProfiles    map[string]orchestration.AdapterProfile `json:"adapter_profiles,omitempty"`
 	RetryMode          string                                  `json:"retry_mode"`
 	MaxAutoRetries     int                                     `json:"max_auto_retries"`
@@ -100,12 +102,45 @@ func (c Config) Validate() error {
 		if route.Primary.Role != role {
 			return fmt.Errorf("role route %q primary role mismatch", role)
 		}
+		if route.Primary.ProfileID != "" {
+			profile, ok := c.AdapterProfiles[route.Primary.ProfileID]
+			if !ok {
+				return fmt.Errorf("role route %q references unknown adapter profile %q", role, route.Primary.ProfileID)
+			}
+			if profile.Adapter != route.Primary.Adapter {
+				return fmt.Errorf("role route %q profile adapter mismatch", role)
+			}
+		}
 		for index, fallback := range route.Fallbacks {
 			if err := validateBindingShape(fallback); err != nil {
 				return fmt.Errorf("role route %q fallback %d: %w", role, index, err)
 			}
 			if fallback.Role != role {
 				return fmt.Errorf("role route %q fallback role mismatch", role)
+			}
+			if fallback.ProfileID != "" {
+				profile, ok := c.AdapterProfiles[fallback.ProfileID]
+				if !ok {
+					return fmt.Errorf("role route %q fallback %d references unknown adapter profile %q", role, index, fallback.ProfileID)
+				}
+				if profile.Adapter != fallback.Adapter {
+					return fmt.Errorf("role route %q fallback %d profile adapter mismatch", role, index)
+				}
+			}
+		}
+	}
+	for id, definition := range c.RoleDefinitions {
+		if strings.TrimSpace(id) == "" || definition.ID != id || strings.TrimSpace(definition.Package) == "" || strings.TrimSpace(definition.Version) == "" || !isSHA256(definition.PromptHash) {
+			return fmt.Errorf("role definition %q is incomplete", id)
+		}
+		if definition.PromptPath != "" && !filepath.IsAbs(definition.PromptPath) {
+			return fmt.Errorf("role definition %q prompt path must be absolute", id)
+		}
+	}
+	if len(c.RoleDefinitions) > 0 {
+		for role := range c.RoleRoutes {
+			if _, ok := c.RoleDefinitions[role]; !ok {
+				return fmt.Errorf("role route %q has no registered Role Prompt", role)
 			}
 		}
 	}
@@ -134,6 +169,48 @@ func (c Config) ResolveRole(role, workspace string) (orchestration.Binding, erro
 		binding.Workspace = workspace
 	}
 	return binding, nil
+}
+
+// RoleDefinition resolves the immutable Role Prompt identity used by the
+// role-first path. A config without a registry remains usable by the legacy
+// low-level binding API, but collaboration admission must provide one.
+func (c Config) RoleDefinition(role string) (orchestration.RoleDefinition, error) {
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return orchestration.RoleDefinition{}, errors.New("role is required")
+	}
+	definition, ok := c.RoleDefinitions[role]
+	if !ok {
+		return orchestration.RoleDefinition{}, fmt.Errorf("role prompt %q is not registered", role)
+	}
+	return definition, nil
+}
+
+// LoadRoleManifest verifies the package prompt files before exposing their
+// identities to policy/Gateway admission. Prompt text is not copied into the
+// policy config or durable core state.
+func LoadRoleManifest(manifestPath string) (Config, error) {
+	registry, err := roles.LoadManifest(manifestPath)
+	if err != nil {
+		return Config{}, err
+	}
+	config := DefaultConfig()
+	config.RoleDefinitions = copyRoleDefinitions(registry.Definitions)
+	if err := config.Validate(); err != nil {
+		return Config{}, err
+	}
+	return config, nil
+}
+
+func copyRoleDefinitions(input map[string]orchestration.RoleDefinition) map[string]orchestration.RoleDefinition {
+	if input == nil {
+		return nil
+	}
+	output := make(map[string]orchestration.RoleDefinition, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 func (c Config) Preflight(task orchestration.Task, requested orchestration.Binding) PreflightDecision {
@@ -323,7 +400,7 @@ func GoalScopeAllows(scope []string, node orchestration.WorkflowNode) bool {
 }
 
 func sameBinding(left, right orchestration.Binding) bool {
-	return left.Role == right.Role && left.Adapter == right.Adapter && left.Model == right.Model &&
+	return left.Role == right.Role && left.Adapter == right.Adapter && left.ProfileID == right.ProfileID && left.Model == right.Model &&
 		left.Reasoning == right.Reasoning && left.Permission == right.Permission &&
 		filepath.Clean(left.Workspace) == filepath.Clean(right.Workspace) && equalStrings(left.MCPAllowlist, right.MCPAllowlist)
 }
@@ -372,4 +449,18 @@ func LoadJSON(raw []byte) (Config, error) {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+func isSHA256(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
 }
