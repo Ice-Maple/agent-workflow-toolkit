@@ -32,9 +32,27 @@ func AcquireRootLock(root string, timeout time.Duration) (*RootLock, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create storage root for lock: %w", err)
 	}
-	file, err := os.OpenFile(filepath.Join(root, ".gateway.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	return AcquireFileLock(filepath.Join(root, ".gateway.lock"), timeout)
+}
+
+// AcquireFileLock obtains an exclusive OS lock for one named file. It is used
+// by the collaboration coordination layer for the machine gate and active-run
+// index, while keeping the same Windows and Unix locking implementation as the
+// state-dir lock.
+func AcquireFileLock(path string, timeout time.Duration) (*RootLock, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("lock path is required")
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	path = filepath.Clean(path)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create lock directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("open state-dir lock: %w", err)
+		return nil, fmt.Errorf("open lock file: %w", err)
 	}
 	deadline := time.Now().Add(timeout)
 	for {

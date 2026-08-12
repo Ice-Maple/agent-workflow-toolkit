@@ -34,18 +34,56 @@ const (
 )
 
 type State struct {
-	SchemaVersion      int                                         `json:"schema_version"`
-	ProtocolVersion    int                                         `json:"protocol_version"`
-	WriterVersion      string                                      `json:"writer_version"`
-	Task               orchestration.Task                          `json:"task"`
-	Revisions          map[string]orchestration.TaskRevision       `json:"revisions"`
-	Nodes              map[string]orchestration.WorkflowNode       `json:"nodes"`
-	Attempts           map[string]orchestration.Attempt            `json:"attempts"`
-	Actions            map[string]orchestration.HostAction         `json:"actions"`
-	Completions        map[string]orchestration.CompletionDecision `json:"completions"`
-	HumanDecisions     []orchestration.HumanDecision               `json:"human_decisions"`
-	GoalAuthorizations map[string]orchestration.GoalAuthorization  `json:"goal_authorizations"`
-	Events             []orchestration.Event                       `json:"events"`
+	SchemaVersion      int                                                    `json:"schema_version"`
+	ProtocolVersion    int                                                    `json:"protocol_version"`
+	WriterVersion      string                                                 `json:"writer_version"`
+	Task               orchestration.Task                                     `json:"task"`
+	Revisions          map[string]orchestration.TaskRevision                  `json:"revisions"`
+	Nodes              map[string]orchestration.WorkflowNode                  `json:"nodes"`
+	Attempts           map[string]orchestration.Attempt                       `json:"attempts"`
+	Actions            map[string]orchestration.HostAction                    `json:"actions"`
+	Completions        map[string]orchestration.CompletionDecision            `json:"completions"`
+	HumanDecisions     []orchestration.HumanDecision                          `json:"human_decisions"`
+	GoalAuthorizations map[string]orchestration.GoalAuthorization             `json:"goal_authorizations"`
+	Events             []orchestration.Event                                  `json:"events"`
+	CollaborationRuns  map[string]orchestration.CollaborationRun              `json:"collaboration_runs,omitempty"`
+	StepRuns           map[string]orchestration.StepRun                       `json:"step_runs,omitempty"`
+	InstanceRuns       map[string]orchestration.InstanceRun                   `json:"instance_runs,omitempty"`
+	TechnicalReleases  map[string]orchestration.CollaborationTechnicalRelease `json:"technical_releases,omitempty"`
+}
+
+// CoordinationState is machine-local collaboration control state. It stays
+// separate from task snapshots so global disable can be linearized without
+// rewriting domain execution evidence.
+type CoordinationState struct {
+	SchemaVersion    int               `json:"schema_version"`
+	FrameworkEnabled bool              `json:"framework_enabled"`
+	GateEpoch        uint64            `json:"gate_epoch"`
+	WorkspaceModes   map[string]string `json:"workspace_modes,omitempty"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+}
+
+type ActiveRunEntry struct {
+	RunID              string    `json:"run_id"`
+	Workspace          string    `json:"workspace"`
+	StateDir           string    `json:"state_dir"`
+	GateEpoch          uint64    `json:"gate_epoch"`
+	AttemptID          string    `json:"attempt_id,omitempty"`
+	InstanceID         string    `json:"instance_id,omitempty"`
+	OwnerPID           int       `json:"owner_pid,omitempty"`
+	OwnerStartMarker   string    `json:"owner_start_marker,omitempty"`
+	OwnerEndpoint      string    `json:"owner_endpoint,omitempty"`
+	OwnerCapability    string    `json:"owner_capability,omitempty"`
+	LastActionID       string    `json:"last_action_id,omitempty"`
+	LastActionSequence int       `json:"last_action_sequence,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	ShutdownStatus     string    `json:"shutdown_status,omitempty"`
+}
+
+type ActiveRunIndex struct {
+	SchemaVersion int                       `json:"schema_version"`
+	Runs          map[string]ActiveRunEntry `json:"runs"`
+	UpdatedAt     time.Time                 `json:"updated_at"`
 }
 
 type RequestFailure struct {
@@ -91,6 +129,98 @@ func New(root string) (*Store, error) {
 
 func (s *Store) Root() string { return s.root }
 
+func (s *Store) CoordinationPath() string { return filepath.Join(s.root, "coordination.json") }
+
+func (s *Store) CoordinationLockPath() string { return filepath.Join(s.root, ".coordination.lock") }
+
+func (s *Store) ActiveRunIndexPath() string { return filepath.Join(s.root, "active-runs.json") }
+
+func (s *Store) ActiveRunIndexLockPath() string { return filepath.Join(s.root, ".active-runs.lock") }
+
+func (s *Store) LoadCoordination() (CoordinationState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	raw, err := os.ReadFile(s.CoordinationPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return CoordinationState{SchemaVersion: CurrentSchemaVersion, GateEpoch: 0, UpdatedAt: time.Now().UTC()}, nil
+	}
+	if err != nil {
+		return CoordinationState{}, fmt.Errorf("load coordination state: %w", err)
+	}
+	var state CoordinationState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return CoordinationState{}, fmt.Errorf("decode coordination state: %w", err)
+	}
+	if state.SchemaVersion != CurrentSchemaVersion {
+		return CoordinationState{}, fmt.Errorf("unsupported coordination schema %d; expected %d", state.SchemaVersion, CurrentSchemaVersion)
+	}
+	return state, nil
+}
+
+func (s *Store) SaveCoordination(state CoordinationState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if state.SchemaVersion == 0 {
+		state.SchemaVersion = CurrentSchemaVersion
+	}
+	if state.SchemaVersion != CurrentSchemaVersion {
+		return fmt.Errorf("unsupported coordination schema %d; expected %d", state.SchemaVersion, CurrentSchemaVersion)
+	}
+	if state.UpdatedAt.IsZero() {
+		state.UpdatedAt = time.Now().UTC()
+	}
+	raw, err := marshalSanitizedIndent(state)
+	if err != nil {
+		return fmt.Errorf("marshal coordination state: %w", err)
+	}
+	return atomicReplace(s.CoordinationPath(), raw, 0o600)
+}
+
+func (s *Store) LoadActiveRunIndex() (ActiveRunIndex, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	raw, err := os.ReadFile(s.ActiveRunIndexPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return ActiveRunIndex{SchemaVersion: CurrentSchemaVersion, Runs: map[string]ActiveRunEntry{}, UpdatedAt: time.Now().UTC()}, nil
+	}
+	if err != nil {
+		return ActiveRunIndex{}, fmt.Errorf("load active-run index: %w", err)
+	}
+	var index ActiveRunIndex
+	if err := json.Unmarshal(raw, &index); err != nil {
+		return ActiveRunIndex{}, fmt.Errorf("decode active-run index: %w", err)
+	}
+	if index.SchemaVersion != CurrentSchemaVersion {
+		return ActiveRunIndex{}, fmt.Errorf("unsupported active-run index schema %d; expected %d", index.SchemaVersion, CurrentSchemaVersion)
+	}
+	if index.Runs == nil {
+		index.Runs = map[string]ActiveRunEntry{}
+	}
+	return index, nil
+}
+
+func (s *Store) SaveActiveRunIndex(index ActiveRunIndex) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index.SchemaVersion == 0 {
+		index.SchemaVersion = CurrentSchemaVersion
+	}
+	if index.SchemaVersion != CurrentSchemaVersion {
+		return fmt.Errorf("unsupported active-run index schema %d; expected %d", index.SchemaVersion, CurrentSchemaVersion)
+	}
+	if index.Runs == nil {
+		index.Runs = map[string]ActiveRunEntry{}
+	}
+	if index.UpdatedAt.IsZero() {
+		index.UpdatedAt = time.Now().UTC()
+	}
+	raw, err := marshalSanitizedIndent(index)
+	if err != nil {
+		return fmt.Errorf("marshal active-run index: %w", err)
+	}
+	return atomicReplace(s.ActiveRunIndexPath(), raw, 0o600)
+}
+
 func NewState(task orchestration.Task, revision orchestration.TaskRevision) State {
 	return State{
 		SchemaVersion:      CurrentSchemaVersion,
@@ -105,6 +235,10 @@ func NewState(task orchestration.Task, revision orchestration.TaskRevision) Stat
 		HumanDecisions:     []orchestration.HumanDecision{},
 		GoalAuthorizations: map[string]orchestration.GoalAuthorization{},
 		Events:             []orchestration.Event{},
+		CollaborationRuns:  map[string]orchestration.CollaborationRun{},
+		StepRuns:           map[string]orchestration.StepRun{},
+		InstanceRuns:       map[string]orchestration.InstanceRun{},
+		TechnicalReleases:  map[string]orchestration.CollaborationTechnicalRelease{},
 	}
 }
 
@@ -138,6 +272,18 @@ func (s *Store) saveUnlocked(state State) error {
 	}
 	if state.GoalAuthorizations == nil {
 		state.GoalAuthorizations = map[string]orchestration.GoalAuthorization{}
+	}
+	if state.CollaborationRuns == nil {
+		state.CollaborationRuns = map[string]orchestration.CollaborationRun{}
+	}
+	if state.StepRuns == nil {
+		state.StepRuns = map[string]orchestration.StepRun{}
+	}
+	if state.InstanceRuns == nil {
+		state.InstanceRuns = map[string]orchestration.InstanceRun{}
+	}
+	if state.TechnicalReleases == nil {
+		state.TechnicalReleases = map[string]orchestration.CollaborationTechnicalRelease{}
 	}
 	if state.HumanDecisions == nil {
 		state.HumanDecisions = []orchestration.HumanDecision{}

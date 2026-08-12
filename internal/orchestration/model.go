@@ -34,6 +34,7 @@ const (
 	NodeRunning               NodeStatus = "running"
 	NodeAwaitingHumanDecision NodeStatus = "awaiting_human_decision"
 	NodeApproved              NodeStatus = "approved"
+	NodeTechnicallyDelivered  NodeStatus = "technically_delivered"
 	NodeRevisionRequested     NodeStatus = "revision_requested"
 	NodeAborted               NodeStatus = "aborted"
 )
@@ -83,6 +84,35 @@ type Binding struct {
 	Permission   string   `json:"permission"`
 	Workspace    string   `json:"workspace"`
 	MCPAllowlist []string `json:"mcp_allowlist,omitempty"`
+}
+
+// RoleDefinition is the non-semantic registry record for a complete Role
+// Prompt owned by a Workflow or project. The prompt itself stays outside the
+// core state; only its source identity and hash are admitted here.
+type RoleDefinition struct {
+	ID         string `json:"id"`
+	Package    string `json:"package"`
+	Version    string `json:"version"`
+	PromptPath string `json:"prompt_path,omitempty"`
+	PromptHash string `json:"prompt_hash"`
+}
+
+type RoleRoute struct {
+	Role      string    `json:"role"`
+	Primary   Binding   `json:"primary"`
+	Fallbacks []Binding `json:"fallbacks,omitempty"`
+}
+
+type AdapterProfile struct {
+	ID            string `json:"id"`
+	Adapter       string `json:"adapter"`
+	Executable    string `json:"executable,omitempty"`
+	Trust         string `json:"trust,omitempty"`
+	Sandbox       string `json:"sandbox,omitempty"`
+	Approval      string `json:"approval,omitempty"`
+	MCPConfigPath string `json:"mcp_config_path,omitempty"`
+	ProviderRef   string `json:"provider_ref,omitempty"`
+	ProfileHash   string `json:"profile_hash"`
 }
 
 type ExpectedOutput struct {
@@ -235,6 +265,119 @@ type Event struct {
 	Type           string         `json:"type"`
 	Data           map[string]any `json:"data,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
+}
+
+type CollaborationMode string
+
+const (
+	CollaborationFramework CollaborationMode = "framework"
+	CollaborationDirect    CollaborationMode = "direct"
+	CollaborationSingle    CollaborationMode = "single"
+)
+
+type CollaborationStepSpec struct {
+	ID    string   `json:"id"`
+	Role  string   `json:"role"`
+	Task  string   `json:"task"`
+	Count int      `json:"count,omitempty"`
+	After []string `json:"after,omitempty"`
+}
+
+type CollaborationPlan struct {
+	SchemaVersion    string                  `json:"schema_version"`
+	RolePromptHashes map[string]string       `json:"role_prompt_hashes,omitempty"`
+	Steps            []CollaborationStepSpec `json:"steps"`
+}
+
+type CollaborationRunStatus string
+
+const (
+	CollaborationRunActive    CollaborationRunStatus = "active"
+	CollaborationRunCompleted CollaborationRunStatus = "completed"
+	CollaborationRunCancelled CollaborationRunStatus = "cancelled"
+	CollaborationRunFailed    CollaborationRunStatus = "failed"
+	CollaborationRunDegraded  CollaborationRunStatus = "degraded"
+)
+
+type CollaborationRun struct {
+	ID                   string                 `json:"run_id"`
+	TaskID               string                 `json:"task_id"`
+	RevisionID           string                 `json:"revision_id"`
+	PlanHash             string                 `json:"plan_hash"`
+	RolePromptHashes     map[string]string      `json:"role_prompt_hashes,omitempty"`
+	Plan                 CollaborationPlan      `json:"plan"`
+	Workspace            string                 `json:"workspace"`
+	EffectiveMode        CollaborationMode      `json:"effective_mode"`
+	GateEpoch            uint64                 `json:"gate_epoch,omitempty"`
+	SchedulerAuthorityID string                 `json:"scheduler_authority_id,omitempty"`
+	Status               CollaborationRunStatus `json:"status"`
+	CreatedAt            time.Time              `json:"created_at"`
+	UpdatedAt            time.Time              `json:"updated_at"`
+}
+
+type StepRunStatus string
+
+const (
+	StepRunWaiting   StepRunStatus = "waiting"
+	StepRunReady     StepRunStatus = "ready"
+	StepRunRunning   StepRunStatus = "running"
+	StepRunCompleted StepRunStatus = "completed"
+	StepRunBlocked   StepRunStatus = "blocked"
+)
+
+type StepRun struct {
+	ID             string        `json:"step_run_id"`
+	RunID          string        `json:"run_id"`
+	StepID         string        `json:"step_id"`
+	After          []string      `json:"after,omitempty"`
+	RequestedCount int           `json:"requested_count"`
+	InstanceIDs    []string      `json:"instance_ids,omitempty"`
+	Status         StepRunStatus `json:"status"`
+	CreatedAt      time.Time     `json:"created_at"`
+	UpdatedAt      time.Time     `json:"updated_at"`
+}
+
+type InstanceRunStatus string
+
+const (
+	InstanceWaiting          InstanceRunStatus = "waiting"
+	InstanceReady            InstanceRunStatus = "ready"
+	InstanceRunning          InstanceRunStatus = "running"
+	InstanceTechnicallyDone  InstanceRunStatus = "technically_delivered"
+	InstanceAwaitingBusiness InstanceRunStatus = "awaiting_business_approval"
+	InstanceFailed           InstanceRunStatus = "failed"
+)
+
+type InstanceRun struct {
+	ID                 string            `json:"instance_id"`
+	RunID              string            `json:"run_id"`
+	StepRunID          string            `json:"step_run_id"`
+	StepID             string            `json:"step_id"`
+	Role               string            `json:"role"`
+	NodeID             string            `json:"node_id,omitempty"`
+	AttemptID          string            `json:"attempt_id,omitempty"`
+	Binding            Binding           `json:"binding,omitempty"`
+	Status             InstanceRunStatus `json:"status"`
+	OutputRefs         []ArtifactRef     `json:"output_refs,omitempty"`
+	CompletionDecision string            `json:"completion_decision_id,omitempty"`
+	CreatedAt          time.Time         `json:"created_at"`
+	UpdatedAt          time.Time         `json:"updated_at"`
+}
+
+type CollaborationTechnicalRelease struct {
+	ID                   string    `json:"technical_release_id"`
+	RunID                string    `json:"run_id"`
+	StepID               string    `json:"step_id"`
+	InstanceID           string    `json:"instance_id"`
+	TaskID               string    `json:"task_id"`
+	NodeID               string    `json:"node_id"`
+	AttemptID            string    `json:"attempt_id"`
+	CompletionDecisionID string    `json:"completion_decision_id"`
+	PlanHash             string    `json:"plan_hash"`
+	AuthorityID          string    `json:"scheduler_authority_id"`
+	Reason               string    `json:"reason"`
+	Evidence             []string  `json:"evidence,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 func NewID(prefix string) string {

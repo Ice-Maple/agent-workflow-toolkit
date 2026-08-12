@@ -16,12 +16,14 @@ import (
 )
 
 type Config struct {
-	RegisteredBindings []orchestration.Binding `json:"registered_bindings"`
-	RetryMode          string                  `json:"retry_mode"`
-	MaxAutoRetries     int                     `json:"max_auto_retries"`
-	FallbackMode       string                  `json:"fallback_mode"`
-	MCPIsolation       string                  `json:"mcp_isolation"`
-	GoalEnabled        bool                    `json:"goal_enabled"`
+	RegisteredBindings []orchestration.Binding                 `json:"registered_bindings"`
+	RoleRoutes         map[string]orchestration.RoleRoute      `json:"role_routes,omitempty"`
+	AdapterProfiles    map[string]orchestration.AdapterProfile `json:"adapter_profiles,omitempty"`
+	RetryMode          string                                  `json:"retry_mode"`
+	MaxAutoRetries     int                                     `json:"max_auto_retries"`
+	FallbackMode       string                                  `json:"fallback_mode"`
+	MCPIsolation       string                                  `json:"mcp_isolation"`
+	GoalEnabled        bool                                    `json:"goal_enabled"`
 }
 
 type PreflightDecision struct {
@@ -88,7 +90,50 @@ func (c Config) Validate() error {
 			return fmt.Errorf("registered binding: %w", err)
 		}
 	}
+	for role, route := range c.RoleRoutes {
+		if strings.TrimSpace(role) == "" || route.Role != role {
+			return fmt.Errorf("role route key and role must match for %q", role)
+		}
+		if err := validateBindingShape(route.Primary); err != nil {
+			return fmt.Errorf("role route %q primary: %w", role, err)
+		}
+		if route.Primary.Role != role {
+			return fmt.Errorf("role route %q primary role mismatch", role)
+		}
+		for index, fallback := range route.Fallbacks {
+			if err := validateBindingShape(fallback); err != nil {
+				return fmt.Errorf("role route %q fallback %d: %w", role, index, err)
+			}
+			if fallback.Role != role {
+				return fmt.Errorf("role route %q fallback role mismatch", role)
+			}
+		}
+	}
+	for id, profile := range c.AdapterProfiles {
+		if strings.TrimSpace(id) == "" || profile.ID != id || strings.TrimSpace(profile.Adapter) == "" || strings.TrimSpace(profile.ProfileHash) == "" {
+			return fmt.Errorf("adapter profile %q is incomplete", id)
+		}
+	}
 	return nil
+}
+
+// ResolveRole returns the explicitly configured primary route for a Role. It
+// never infers an Adapter/model from task text. Fallback selection is handled
+// by the caller after a primary preflight failure and remains visible.
+func (c Config) ResolveRole(role, workspace string) (orchestration.Binding, error) {
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return orchestration.Binding{}, errors.New("role is required")
+	}
+	route, ok := c.RoleRoutes[role]
+	if !ok {
+		return orchestration.Binding{}, fmt.Errorf("role route %q is not registered", role)
+	}
+	binding := route.Primary
+	if binding.Workspace == "" {
+		binding.Workspace = workspace
+	}
+	return binding, nil
 }
 
 func (c Config) Preflight(task orchestration.Task, requested orchestration.Binding) PreflightDecision {

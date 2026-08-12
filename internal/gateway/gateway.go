@@ -14,10 +14,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"agent-workflow-toolkit/internal/coordination"
 	"agent-workflow-toolkit/internal/orchestration"
 	"agent-workflow-toolkit/internal/policy"
 	protocol "agent-workflow-toolkit/internal/protocol/v1"
@@ -84,6 +86,9 @@ type PrepareAttemptInput struct {
 	ControllerInstanceID string                 `json:"controller_instance_id"`
 	Binding              *orchestration.Binding `json:"binding,omitempty"`
 	PreviousAttemptID    string                 `json:"previous_attempt_id,omitempty"`
+	CollaborationRunID   string                 `json:"collaboration_run_id,omitempty"`
+	InstanceRunID        string                 `json:"instance_run_id,omitempty"`
+	GateEpoch            uint64                 `json:"gate_epoch,omitempty"`
 }
 
 type RetryAttemptInput struct {
@@ -150,7 +155,52 @@ type AppendEventInput struct {
 }
 
 type CompletionInput struct {
-	AttemptID string `json:"attempt_id"`
+	AttemptID          string `json:"attempt_id"`
+	CollaborationRunID string `json:"collaboration_run_id,omitempty"`
+	InstanceRunID      string `json:"instance_run_id,omitempty"`
+	GateEpoch          uint64 `json:"gate_epoch,omitempty"`
+}
+
+type CreateCollaborationRunInput struct {
+	TaskID           string                          `json:"task_id"`
+	RevisionID       string                          `json:"revision_id,omitempty"`
+	Workspace        string                          `json:"workspace"`
+	EffectiveMode    orchestration.CollaborationMode `json:"effective_mode"`
+	GateEpoch        uint64                          `json:"gate_epoch,omitempty"`
+	Plan             orchestration.CollaborationPlan `json:"plan"`
+	RolePromptHashes map[string]string               `json:"role_prompt_hashes,omitempty"`
+	StateDir         string                          `json:"state_dir"`
+}
+
+type CreateCollaborationRunResult struct {
+	Run       orchestration.CollaborationRun `json:"run"`
+	StepRuns  []orchestration.StepRun        `json:"step_runs"`
+	Instances []orchestration.InstanceRun    `json:"instances"`
+}
+
+type ResolveRoleInput struct {
+	Role      string `json:"role"`
+	Workspace string `json:"workspace"`
+}
+
+type ResolveRoleResult struct {
+	Binding orchestration.Binding `json:"binding"`
+}
+
+type TechnicalReleaseInput struct {
+	RunID      string `json:"run_id"`
+	InstanceID string `json:"instance_id"`
+	Reason     string `json:"reason"`
+}
+
+type TechnicalReleaseResult struct {
+	Release   orchestration.CollaborationTechnicalRelease `json:"release"`
+	Instance  orchestration.InstanceRun                   `json:"instance"`
+	NextReady []orchestration.InstanceRun                 `json:"next_ready,omitempty"`
+}
+
+type CreateCollaborationRunOptions struct {
+	CoordinationRoot string
 }
 
 type CompletionResult struct {
@@ -199,10 +249,334 @@ type CancelResult struct {
 }
 
 type Gateway struct {
-	store       *storage.Store
-	config      policy.Config
-	saveReceipt func(storage.RequestReceipt) error
-	mu          sync.Mutex
+	store              *storage.Store
+	config             policy.Config
+	coordination       *coordination.Manager
+	coordinationRoot   string
+	coordinationLocked bool
+	saveReceipt        func(storage.RequestReceipt) error
+	mu                 sync.Mutex
+}
+
+func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (CreateCollaborationRunResult, error) {
+	coord := g.coordination
+	if coord == nil {
+		var err error
+		coord, err = coordination.NewWithStore(g.store, controlActionLeaseDuration)
+		if err != nil {
+			return CreateCollaborationRunResult{}, err
+		}
+	}
+	if input.GateEpoch == 0 {
+		return CreateCollaborationRunResult{}, fail("gate_epoch_required", "framework collaboration requires the current machine gate epoch", nil)
+	}
+	if !g.coordinationLocked {
+		if err := coord.Admission(input.GateEpoch); err != nil {
+			return CreateCollaborationRunResult{}, fail("collaboration_gate_rejected", err.Error(), nil)
+		}
+	}
+	state, err := g.store.Load(input.TaskID)
+	if err != nil {
+		return CreateCollaborationRunResult{}, fail("unknown_task", "task was not found", nil)
+	}
+	if input.RevisionID == "" {
+		input.RevisionID = state.Task.CurrentRevisionID
+	}
+	if input.RevisionID != state.Task.CurrentRevisionID {
+		return CreateCollaborationRunResult{}, fail("revision_mismatch", "collaboration plan must target the current task revision", nil)
+	}
+	if input.EffectiveMode != orchestration.CollaborationFramework {
+		return CreateCollaborationRunResult{}, fail("unsupported_collaboration_mode", "only framework mode creates a core collaboration run", nil)
+	}
+	if input.Plan.SchemaVersion != "collaboration/v1" {
+		return CreateCollaborationRunResult{}, fail("invalid_collaboration_plan", "plan schema_version must be collaboration/v1", nil)
+	}
+	if len(input.Plan.Steps) == 0 {
+		return CreateCollaborationRunResult{}, fail("invalid_collaboration_plan", "plan must contain at least one step", nil)
+	}
+	if strings.TrimSpace(input.StateDir) == "" {
+		return CreateCollaborationRunResult{}, fail("state_dir_required", "state_dir is required for collaboration admission", nil)
+	}
+	if input.Workspace == "" {
+		input.Workspace = state.Task.Workspace
+	}
+	if canonical := canonicalPathForCompare(input.Workspace); canonical != canonicalPathForCompare(state.Task.Workspace) {
+		return CreateCollaborationRunResult{}, fail("workspace_mismatch", "collaboration workspace does not match task workspace", nil)
+	}
+	if err := validateCollaborationPlan(input.Plan); err != nil {
+		return CreateCollaborationRunResult{}, fail("invalid_collaboration_plan", err.Error(), nil)
+	}
+	planHash := hashJSON(input.Plan)
+	runID := orchestration.NewID("run")
+	now := time.Now().UTC()
+	run := orchestration.CollaborationRun{ID: runID, TaskID: state.Task.ID, RevisionID: input.RevisionID, PlanHash: planHash, RolePromptHashes: copyStringMap(input.RolePromptHashes), Plan: input.Plan, Workspace: state.Task.Workspace, EffectiveMode: input.EffectiveMode, GateEpoch: input.GateEpoch, SchedulerAuthorityID: orchestration.NewID("scheduler"), Status: orchestration.CollaborationRunActive, CreatedAt: now, UpdatedAt: now}
+	stepRuns := make([]orchestration.StepRun, 0, len(input.Plan.Steps))
+	instances := make([]orchestration.InstanceRun, 0)
+	state.CollaborationRuns[run.ID] = run
+	for _, spec := range input.Plan.Steps {
+		count := spec.Count
+		if count == 0 {
+			count = 1
+		}
+		status := orchestration.StepRunWaiting
+		if len(spec.After) == 0 {
+			status = orchestration.StepRunReady
+		}
+		stepRun := orchestration.StepRun{ID: orchestration.NewID("step"), RunID: run.ID, StepID: spec.ID, After: append([]string(nil), spec.After...), RequestedCount: count, Status: status, CreatedAt: now, UpdatedAt: now}
+		state.StepRuns[stepRun.ID] = stepRun
+		stepRuns = append(stepRuns, stepRun)
+		for index := 0; index < count; index++ {
+			instance := orchestration.InstanceRun{ID: orchestration.NewID("instance"), RunID: run.ID, StepRunID: stepRun.ID, StepID: spec.ID, Role: spec.Role, Status: orchestration.InstanceWaiting, CreatedAt: now, UpdatedAt: now}
+			if status == orchestration.StepRunReady {
+				instance.Status = orchestration.InstanceReady
+			}
+			state.InstanceRuns[instance.ID] = instance
+			stepRun.InstanceIDs = append(stepRun.InstanceIDs, instance.ID)
+			instances = append(instances, instance)
+		}
+		state.StepRuns[stepRun.ID] = stepRun
+	}
+	state.CollaborationRuns[run.ID] = run
+	event := orchestration.NewEvent(state.Task.ID, "collaboration.run.created", map[string]any{"run_id": run.ID, "plan_hash": run.PlanHash, "gate_epoch": run.GateEpoch})
+	if err := g.saveEvents(state, event); err != nil {
+		return CreateCollaborationRunResult{}, err
+	}
+	entry := storage.ActiveRunEntry{RunID: run.ID, Workspace: run.Workspace, StateDir: input.StateDir, GateEpoch: run.GateEpoch}
+	if g.coordinationLocked {
+		if err := coord.RegisterRunUnderLock(entry); err != nil {
+			return CreateCollaborationRunResult{}, fail("collaboration_run_registration_failed", err.Error(), nil)
+		}
+	} else if _, err := coord.CreateRun(entry); err != nil {
+		return CreateCollaborationRunResult{}, fail("collaboration_run_registration_failed", err.Error(), nil)
+	}
+	return CreateCollaborationRunResult{Run: run, StepRuns: stepRuns, Instances: instances}, nil
+}
+
+func (g *Gateway) RecordCollaborationTechnicalRelease(input TechnicalReleaseInput) (TechnicalReleaseResult, error) {
+	if g.coordination != nil {
+		if strings.TrimSpace(input.RunID) == "" {
+			return TechnicalReleaseResult{}, fail("run_required", "run_id is required", nil)
+		}
+		// The operation itself resolves and validates the run-scoped authority
+		// from core state. It never accepts an arbitrary authority string.
+		if _, ok := g.findRun(input.RunID); !ok {
+			return TechnicalReleaseResult{}, fail("unknown_collaboration_run", "collaboration run was not found", nil)
+		}
+	}
+	state, err := g.findState(func(candidate storage.State) bool {
+		_, ok := candidate.CollaborationRuns[input.RunID]
+		return ok
+	})
+	if err != nil {
+		return TechnicalReleaseResult{}, fail("unknown_collaboration_run", "collaboration run was not found", nil)
+	}
+	run, ok := state.CollaborationRuns[input.RunID]
+	if !ok || run.Status != orchestration.CollaborationRunActive {
+		return TechnicalReleaseResult{}, fail("collaboration_run_not_active", "collaboration run is not active", nil)
+	}
+	if strings.TrimSpace(input.InstanceID) == "" {
+		return TechnicalReleaseResult{}, fail("instance_required", "instance_id is required", nil)
+	}
+	instance, ok := state.InstanceRuns[input.InstanceID]
+	if !ok || instance.RunID != run.ID {
+		return TechnicalReleaseResult{}, fail("unknown_collaboration_instance", "instance does not belong to the collaboration run", nil)
+	}
+	if instance.AttemptID == "" || instance.NodeID == "" {
+		return TechnicalReleaseResult{}, fail("instance_not_executed", "instance is not mapped to a Gateway node and attempt", nil)
+	}
+	attempt, ok := state.Attempts[instance.AttemptID]
+	if !ok || attempt.NodeID != instance.NodeID || attempt.Status != orchestration.AttemptCompleted {
+		return TechnicalReleaseResult{}, fail("technical_release_ineligible", "instance Attempt is not a validated completed execution", nil)
+	}
+	node, ok := state.Nodes[instance.NodeID]
+	if !ok || node.CheckpointAttemptID != attempt.ID || node.Status != orchestration.NodeAwaitingHumanDecision {
+		return TechnicalReleaseResult{}, fail("technical_release_ineligible", "instance is not at its completion checkpoint", nil)
+	}
+	decision, ok := latestCompletionDecision(state, attempt.ID)
+	if !ok || decision.Status != orchestration.AttemptCompleted || decision.Reason == "delivery_missing" {
+		return TechnicalReleaseResult{}, fail("technical_release_ineligible", "only validated completion may receive technical release", nil)
+	}
+	if len(decision.Artifacts) == 0 && node.ExpectedOutput.Required {
+		return TechnicalReleaseResult{}, fail("technical_release_ineligible", "required delivery is missing", nil)
+	}
+	stepRun, ok := state.StepRuns[instance.StepRunID]
+	if !ok || !dependenciesReleased(state, run.ID, stepRun.After) {
+		return TechnicalReleaseResult{}, fail("technical_release_dependency_blocked", "upstream collaboration steps are not technically released", nil)
+	}
+	for _, release := range state.TechnicalReleases {
+		if release.InstanceID == instance.ID {
+			return TechnicalReleaseResult{}, fail("technical_release_already_recorded", "instance already has a technical release", nil)
+		}
+	}
+	now := time.Now().UTC()
+	release := orchestration.CollaborationTechnicalRelease{ID: orchestration.NewID("release"), RunID: run.ID, StepID: instance.StepID, InstanceID: instance.ID, TaskID: run.TaskID, NodeID: instance.NodeID, AttemptID: attempt.ID, CompletionDecisionID: decision.ID, PlanHash: run.PlanHash, AuthorityID: run.SchedulerAuthorityID, Reason: input.Reason, Evidence: append([]string(nil), decision.Evidence...), CreatedAt: now}
+	state.TechnicalReleases[release.ID] = release
+	instance.Status = orchestration.InstanceTechnicallyDone
+	instance.CompletionDecision = decision.ID
+	instance.OutputRefs = append([]orchestration.ArtifactRef(nil), decision.Artifacts...)
+	instance.UpdatedAt = now
+	state.InstanceRuns[instance.ID] = instance
+	node.Status = orchestration.NodeTechnicallyDelivered
+	node.CheckpointAttemptID = ""
+	node.UpdatedAt = now
+	state.Nodes[node.ID] = node
+	if allStepInstancesReleased(state, stepRun) {
+		stepRun.Status = orchestration.StepRunCompleted
+		stepRun.UpdatedAt = now
+		state.StepRuns[stepRun.ID] = stepRun
+	}
+	ready := readyInstances(state, run.ID)
+	event := orchestration.NewEvent(state.Task.ID, "collaboration.technical_release", map[string]any{"run_id": run.ID, "instance_id": instance.ID, "technical_release_id": release.ID, "authority_id": release.AuthorityID})
+	event.NodeID, event.AttemptID = node.ID, attempt.ID
+	if err := g.saveEvents(state, event); err != nil {
+		return TechnicalReleaseResult{}, err
+	}
+	return TechnicalReleaseResult{Release: release, Instance: instance, NextReady: ready}, nil
+}
+
+func (g *Gateway) findRun(runID string) (orchestration.CollaborationRun, bool) {
+	var run orchestration.CollaborationRun
+	state, err := g.findState(func(candidate storage.State) bool {
+		candidateRun, ok := candidate.CollaborationRuns[runID]
+		if ok {
+			run = candidateRun
+		}
+		return ok
+	})
+	return run, err == nil && state.Task.ID != ""
+}
+
+func validateCollaborationPlan(plan orchestration.CollaborationPlan) error {
+	if plan.SchemaVersion != "collaboration/v1" {
+		return errors.New("plan schema_version must be collaboration/v1")
+	}
+	seen := make(map[string]struct{}, len(plan.Steps))
+	for index, step := range plan.Steps {
+		if strings.TrimSpace(step.ID) == "" || strings.TrimSpace(step.Role) == "" || strings.TrimSpace(step.Task) == "" {
+			return fmt.Errorf("step %d requires id, role and task", index)
+		}
+		if _, exists := seen[step.ID]; exists {
+			return fmt.Errorf("duplicate step id %q", step.ID)
+		}
+		seen[step.ID] = struct{}{}
+		if step.Count < 0 {
+			return fmt.Errorf("step %q count cannot be negative", step.ID)
+		}
+	}
+	for index := range plan.Steps {
+		for _, dependency := range plan.Steps[index].After {
+			if dependency == plan.Steps[index].ID {
+				return fmt.Errorf("step %q cannot depend on itself", dependency)
+			}
+			if _, exists := seen[dependency]; !exists {
+				return fmt.Errorf("step %q depends on unknown step %q", plan.Steps[index].ID, dependency)
+			}
+		}
+	}
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var visit func(string) error
+	visit = func(id string) error {
+		if visiting[id] {
+			return fmt.Errorf("collaboration plan contains a dependency cycle at %q", id)
+		}
+		if visited[id] {
+			return nil
+		}
+		visiting[id] = true
+		for _, step := range plan.Steps {
+			if step.ID != id {
+				continue
+			}
+			for _, dependency := range step.After {
+				if err := visit(dependency); err != nil {
+					return err
+				}
+			}
+		}
+		delete(visiting, id)
+		visited[id] = true
+		return nil
+	}
+	for id := range seen {
+		if err := visit(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hashJSON(value any) string {
+	raw, _ := json.Marshal(value)
+	return hashBytes(raw)
+}
+
+func dependenciesReleased(state storage.State, runID string, dependencies []string) bool {
+	for _, dependency := range dependencies {
+		found := false
+		for _, step := range state.StepRuns {
+			if step.RunID == runID && step.StepID == dependency {
+				found = true
+				if !allStepInstancesReleased(state, step) {
+					return false
+				}
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func allStepInstancesReleased(state storage.State, step orchestration.StepRun) bool {
+	if len(step.InstanceIDs) == 0 {
+		return false
+	}
+	for _, instanceID := range step.InstanceIDs {
+		instance, ok := state.InstanceRuns[instanceID]
+		if !ok || instance.Status != orchestration.InstanceTechnicallyDone {
+			return false
+		}
+	}
+	return true
+}
+
+func readyInstances(state storage.State, runID string) []orchestration.InstanceRun {
+	ready := make([]orchestration.InstanceRun, 0)
+	for stepID, step := range state.StepRuns {
+		if step.RunID != runID || step.Status == orchestration.StepRunCompleted || !dependenciesReleased(state, runID, step.After) {
+			continue
+		}
+		step.Status = orchestration.StepRunReady
+		step.UpdatedAt = time.Now().UTC()
+		state.StepRuns[stepID] = step
+		for _, instanceID := range step.InstanceIDs {
+			instance := state.InstanceRuns[instanceID]
+			if instance.Status == orchestration.InstanceWaiting {
+				instance.Status = orchestration.InstanceReady
+				instance.UpdatedAt = step.UpdatedAt
+				state.InstanceRuns[instanceID] = instance
+				ready = append(ready, instance)
+			}
+		}
+	}
+	sort.Slice(ready, func(i, j int) bool { return ready[i].ID < ready[j].ID })
+	return ready
+}
+
+func (g *Gateway) prepareCollaborationGate(epoch uint64) error {
+	coord, err := coordination.NewWithStore(g.store, controlActionLeaseDuration)
+	if err != nil {
+		return err
+	}
+	if !g.coordinationLocked {
+		if err := coord.Admission(epoch); err != nil {
+			return fail("collaboration_gate_rejected", err.Error(), nil)
+		}
+	}
+	return nil
 }
 
 func New(store *storage.Store, config policy.Config) (*Gateway, error) {
@@ -214,6 +588,44 @@ func New(store *storage.Store, config policy.Config) (*Gateway, error) {
 		return nil, err
 	}
 	return &Gateway{store: store, config: config, saveReceipt: store.SaveReceipt}, nil
+}
+
+func NewWithCoordination(store *storage.Store, config policy.Config, manager *coordination.Manager) (*Gateway, error) {
+	gateway, err := New(store, config)
+	if err != nil {
+		return nil, err
+	}
+	if manager == nil {
+		return nil, errors.New("coordination manager is required")
+	}
+	gateway.coordination = manager
+	return gateway, nil
+}
+
+func NewWithCoordinationRoot(store *storage.Store, config policy.Config, root string) (*Gateway, error) {
+	manager, err := coordination.New(root, controlActionLeaseDuration)
+	if err != nil {
+		return nil, err
+	}
+	gateway, err := NewWithCoordination(store, config, manager)
+	if err != nil {
+		return nil, err
+	}
+	gateway.coordinationRoot = root
+	return gateway, nil
+}
+
+// NewWithCoordinationLocked is used by the one-shot CLI after it has acquired
+// the documented gate -> active-run index -> state-dir locks. Collaboration
+// admission methods then perform only the non-locking checks and mutations in
+// that critical section.
+func NewWithCoordinationLocked(store *storage.Store, config policy.Config, manager *coordination.Manager) (*Gateway, error) {
+	gateway, err := NewWithCoordination(store, config, manager)
+	if err != nil {
+		return nil, err
+	}
+	gateway.coordinationLocked = true
+	return gateway, nil
 }
 
 func (g *Gateway) Handle(request protocol.Request) (json.RawMessage, error) {
@@ -295,6 +707,24 @@ func (g *Gateway) dispatch(operation string, raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return g.PrepareAttempt(input)
+	case "createCollaborationRun":
+		var input CreateCollaborationRunInput
+		if err := decodePayload(raw, &input); err != nil {
+			return nil, err
+		}
+		return g.CreateCollaborationRun(input)
+	case "resolveRole":
+		var input ResolveRoleInput
+		if err := decodePayload(raw, &input); err != nil {
+			return nil, err
+		}
+		return g.ResolveRole(input)
+	case "recordCollaborationTechnicalRelease":
+		var input TechnicalReleaseInput
+		if err := decodePayload(raw, &input); err != nil {
+			return nil, err
+		}
+		return g.RecordCollaborationTechnicalRelease(input)
 	case "prepareRetryAttempt":
 		var input RetryAttemptInput
 		if err := decodePayload(raw, &input); err != nil {
@@ -364,6 +794,14 @@ func (g *Gateway) dispatch(operation string, raw json.RawMessage) (any, error) {
 	default:
 		return nil, fail("unknown_operation", "operation is not implemented by the gateway", map[string]any{"operation": operation})
 	}
+}
+
+func (g *Gateway) ResolveRole(input ResolveRoleInput) (ResolveRoleResult, error) {
+	binding, err := g.config.ResolveRole(input.Role, input.Workspace)
+	if err != nil {
+		return ResolveRoleResult{}, fail("role_route_missing", err.Error(), nil)
+	}
+	return ResolveRoleResult{Binding: binding}, nil
 }
 
 func (g *Gateway) CreateTask(input CreateTaskInput) (CreateTaskResult, error) {
@@ -480,6 +918,22 @@ func (g *Gateway) PrepareAttempt(input PrepareAttemptInput) (LaunchDecision, err
 	if input.Binding != nil && !sameBinding(*input.Binding, *node.ApprovedBinding) {
 		return LaunchDecision{}, fail("binding_mismatch", "approved binding cannot be changed during prepareAttempt", nil)
 	}
+	if input.CollaborationRunID != "" || input.InstanceRunID != "" || input.GateEpoch != 0 {
+		if input.CollaborationRunID == "" || input.InstanceRunID == "" || input.GateEpoch == 0 {
+			return LaunchDecision{}, fail("collaboration_linkage_required", "collaboration attempt admission requires run_id, instance_id and gate_epoch", nil)
+		}
+		run, ok := state.CollaborationRuns[input.CollaborationRunID]
+		instance, instanceOK := state.InstanceRuns[input.InstanceRunID]
+		if !ok || !instanceOK || run.Status != orchestration.CollaborationRunActive || instance.RunID != run.ID || instance.NodeID != "" && instance.NodeID != node.ID || run.GateEpoch != input.GateEpoch {
+			return LaunchDecision{}, fail("collaboration_admission_rejected", "collaboration run, instance, node and gate epoch do not match", nil)
+		}
+		if instance.Status != orchestration.InstanceReady {
+			return LaunchDecision{}, fail("collaboration_instance_not_ready", "collaboration instance is not ready", nil)
+		}
+		if err := g.prepareCollaborationGate(input.GateEpoch); err != nil {
+			return LaunchDecision{}, err
+		}
+	}
 	var retryOf string
 	if input.PreviousAttemptID != "" {
 		previous, ok := state.Attempts[input.PreviousAttemptID]
@@ -501,7 +955,24 @@ func (g *Gateway) PrepareAttempt(input PrepareAttemptInput) (LaunchDecision, err
 	} else if hasAnyAttemptForNode(state, node.ID, node.RevisionID) {
 		return LaunchDecision{}, fail("retry_lineage_required", "a subsequent Attempt must reference its predecessor", nil)
 	}
-	return g.prepareAttempt(state, node, *node.ApprovedBinding, node.PreflightMCPIsolation, input.ControllerInstanceID, retryOf, "", "attempt.prepared")
+	launch, err := g.prepareAttempt(state, node, *node.ApprovedBinding, node.PreflightMCPIsolation, input.ControllerInstanceID, retryOf, "", "attempt.prepared")
+	if err != nil {
+		return LaunchDecision{}, err
+	}
+	if input.InstanceRunID != "" {
+		instance := state.InstanceRuns[input.InstanceRunID]
+		instance.NodeID = launch.Attempt.NodeID
+		instance.AttemptID = launch.Attempt.ID
+		instance.Binding = launch.Attempt.Binding
+		instance.Status = orchestration.InstanceRunning
+		instance.UpdatedAt = time.Now().UTC()
+		state.InstanceRuns[input.InstanceRunID] = instance
+		state.CollaborationRuns[input.CollaborationRunID] = state.CollaborationRuns[input.CollaborationRunID]
+		if err := g.saveState(state); err != nil {
+			return LaunchDecision{}, err
+		}
+	}
+	return launch, nil
 }
 
 // PrepareRetryAttempt is the automatic retry entry point. It creates a new
@@ -933,6 +1404,15 @@ func (g *Gateway) RequestCompletion(input CompletionInput) (CompletionResult, er
 	}
 	if node.Status == orchestration.NodeAwaitingHumanDecision && node.CheckpointAttemptID == attempt.ID {
 		return CompletionResult{}, fail("completion_already_recorded", "the current Attempt already has a human checkpoint; record request_revision or abort instead of recomputing completion", map[string]any{"attempt_id": attempt.ID})
+	}
+	if input.CollaborationRunID != "" || input.InstanceRunID != "" {
+		if input.CollaborationRunID == "" || input.InstanceRunID == "" {
+			return CompletionResult{}, fail("collaboration_linkage_required", "collaboration completion requires run_id and instance_id", nil)
+		}
+		instance, ok := state.InstanceRuns[input.InstanceRunID]
+		if !ok || instance.RunID != input.CollaborationRunID || instance.AttemptID != attempt.ID {
+			return CompletionResult{}, fail("collaboration_admission_rejected", "completion linkage does not match the Attempt", nil)
+		}
 	}
 	decision := orchestration.CompletionDecision{ID: orchestration.NewID("completion"), AttemptID: attempt.ID, Status: attempt.Status, CreatedAt: time.Now().UTC()}
 	if attempt.Status != orchestration.AttemptCompleted {
