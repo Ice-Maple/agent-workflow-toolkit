@@ -1,0 +1,6 @@
+schema_version: collaboration-roles/v1
+package: sample-workflow
+version: 1.0.0
+roles:
+  reviewer:
+    prompt: reviewer.md

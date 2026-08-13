@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"agent-workflow-toolkit/internal/gateway"
+	"agent-workflow-toolkit/internal/orchestration"
 	protocol "agent-workflow-toolkit/internal/protocol/v1"
 )
 
@@ -65,6 +67,30 @@ func TestGatewayCLIExecutesRequestAndPersistsState(t *testing.T) {
 	failed := runGatewayCLI(t, binary, stateDir, missingNode)
 	if failed.OK || failed.Error == nil || failed.Error.Code != "unknown_node" {
 		t.Fatalf("unknown node CLI response = %#v", failed)
+	}
+}
+
+func TestDisableShutdownStatusPreservesUncertainty(t *testing.T) {
+	for _, test := range []struct {
+		status orchestration.AttemptStatus
+		want   string
+	}{
+		{orchestration.AttemptCompleted, "cancelled"},
+		{orchestration.AttemptFailed, "cancelled"},
+		{orchestration.AttemptCancelRequested, "contact_owner"},
+		{orchestration.AttemptCancelUnconfirmed, "cancel_pending"},
+		{orchestration.AttemptIncomplete, "outcome_unknown"},
+		{orchestration.AttemptContaminated, "outcome_unknown"},
+	} {
+		if got := shutdownStatusForAttempt(test.status); got != test.want {
+			t.Fatalf("status %q mapped to %q, want %q", test.status, got, test.want)
+		}
+	}
+	if got := shutdownStatusForOwnerError(errors.New("stale_owner: endpoint unavailable")); got != "stale_owner" {
+		t.Fatalf("stale owner mapped to %q", got)
+	}
+	if got := shutdownStatusForOwnerError(errors.New("outcome_unknown: response lost")); got != "outcome_unknown" {
+		t.Fatalf("uncertain owner result mapped to %q", got)
 	}
 }
 

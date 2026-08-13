@@ -892,4 +892,4 @@ steps:
 3. 实现完成后由独立 reviewer 同时核对原始 role-first 目标、设计、代码、指南和真实消费体验。
 4. 上游形成新的 acceptance commit 后，再选择 `doc-ai-toolkit` 中一个可单独安装的 Skill 做真实接入。
 
-在 U0–U3 实现和验收完成前，本文件只代表已确认设计，不代表 Role-first 入口、Role Prompt 分发、三态路由或通用 Scheduler 已经可用。
+截至 2026-08-13，U0–U3 的核心合同、Role Registry、三态 route/run 创建入口、technical release、external CLI public bridge、依赖闭包安装器、clean-consumer smoke、三 CLI public bridge handoff 和 Codex App Native role-first smoke 已实现并形成证据；最终独立 closure、全量回归和 acceptance commit 仍在收口。因此本文仍是设计基线，完成状态以实现证据和提交为准。

@@ -174,6 +174,10 @@ func hashToken(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func OwnerCapabilityHash(receipt OwnerReceipt) string {
+	return hashToken(receipt.Capability)
+}
+
 type ownerIPCRequest struct {
 	SchemaVersion    string                   `json:"schema_version"`
 	Capability       string                   `json:"capability"`
@@ -337,14 +341,14 @@ func sendOwnerAction(ctx context.Context, receipt OwnerReceipt, action orchestra
 	}
 	defer connection.Close()
 	if err := connection.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		return orchestration.HostActionResult{}, err
+		return orchestration.HostActionResult{}, errors.New("outcome_unknown: owner connection deadline could not be established")
 	}
 	if err := json.NewEncoder(connection).Encode(ownerIPCRequest{SchemaVersion: BridgeSchema, Capability: receipt.Capability, OwnerStartMarker: receipt.OwnerStartMarker, AttemptID: receipt.AttemptID, Operation: "execute", Action: action}); err != nil {
-		return orchestration.HostActionResult{}, errors.New("stale_owner: owner request failed")
+		return orchestration.HostActionResult{}, errors.New("outcome_unknown: owner request delivery is uncertain")
 	}
 	var response ownerIPCResponse
 	if err := json.NewDecoder(connection).Decode(&response); err != nil {
-		return orchestration.HostActionResult{}, errors.New("stale_owner: owner response unavailable")
+		return orchestration.HostActionResult{}, errors.New("outcome_unknown: owner response unavailable after request delivery")
 	}
 	if !response.OK || response.Result == nil {
 		if response.Error == "" {
@@ -353,4 +357,8 @@ func sendOwnerAction(ctx context.Context, receipt OwnerReceipt, action orchestra
 		return orchestration.HostActionResult{}, errors.New(response.Error)
 	}
 	return *response.Result, nil
+}
+
+func SendOwnerActionForConvergence(ctx context.Context, receipt OwnerReceipt, action orchestration.HostAction) (orchestration.HostActionResult, error) {
+	return sendOwnerAction(ctx, receipt, action)
 }

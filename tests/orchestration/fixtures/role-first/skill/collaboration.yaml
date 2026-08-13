@@ -1,0 +1,8 @@
+schema_version: collaboration/v1
+role_dependencies:
+  - sample-workflow/reviewer
+steps:
+  - id: review
+    role: sample-workflow/reviewer
+    task: Review the supplied change using the current Skill rules
+    count: 2

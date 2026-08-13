@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,10 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"agent-workflow-toolkit/internal/bridge"
+	"agent-workflow-toolkit/internal/collaboration"
 	"agent-workflow-toolkit/internal/coordination"
 	"agent-workflow-toolkit/internal/gateway"
+	"agent-workflow-toolkit/internal/orchestration"
 	"agent-workflow-toolkit/internal/policy"
 	protocol "agent-workflow-toolkit/internal/protocol/v1"
+	"agent-workflow-toolkit/internal/roles"
 	"agent-workflow-toolkit/internal/storage"
 )
 
@@ -39,6 +44,9 @@ func main() {
 	enableMode := flag.Bool("enable", false, "enable the machine-local collaboration framework gate")
 	disableMode := flag.Bool("disable", false, "disable the machine-local collaboration framework gate")
 	setWorkspaceMode := flag.Bool("set-workspace-mode", false, "set the mode for one canonical workspace")
+	inspectCollaboration := flag.Bool("inspect-collaboration", false, "validate and print one business Skill collaboration.yaml")
+	inspectRoles := flag.Bool("inspect-roles", false, "validate and print one Workflow/project roles.yaml registry")
+	collaborationFile := flag.String("collaboration-file", "", "business Skill collaboration.yaml used by --inspect-collaboration")
 	workspace := flag.String("workspace", "", "canonical workspace used by --status or --set-workspace-mode")
 	workspaceMode := flag.String("workspace-mode", "", "workspace mode: framework, direct or single")
 	stateDir := flag.String("state-dir", "", "directory for task state and request receipts")
@@ -53,9 +61,31 @@ func main() {
 		fmt.Printf("agent-workflow-core version=%s protocol=%d maturity=%s revision=%s dirty=%t\n", metadata.Version, metadata.ProtocolMajor, metadata.Maturity, metadata.Revision, metadata.Dirty)
 		return
 	}
+	if *inspectCollaboration || *inspectRoles {
+		if *inspectCollaboration == *inspectRoles {
+			fmt.Fprintln(os.Stderr, "exactly one of --inspect-collaboration and --inspect-roles is required")
+			os.Exit(2)
+		}
+		var output any
+		var err error
+		if *inspectCollaboration {
+			output, err = collaboration.Load(*collaborationFile)
+		} else {
+			output, err = roles.LoadManifest(*rolesManifest)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := encodeControlOutput(output); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	controlMode := *statusMode || *enableMode || *disableMode || *setWorkspaceMode
 	if !*validateRequest && !*gatewayMode && !controlMode {
-		fmt.Fprintln(os.Stderr, "usage: agent-workflow-core --version | --validate-request | --gateway [--state-dir DIR] [--coordination-dir DIR] [--policy-file FILE] [--roles-manifest FILE] | --status | --enable | --disable | --set-workspace-mode --workspace DIR --workspace-mode MODE")
+		fmt.Fprintln(os.Stderr, "usage: agent-workflow-core --version | --validate-request | --inspect-collaboration --collaboration-file FILE | --inspect-roles --roles-manifest FILE | --gateway [--state-dir DIR] [--coordination-dir DIR] [--policy-file FILE] [--roles-manifest FILE] | --status | --enable | --disable | --set-workspace-mode --workspace DIR --workspace-mode MODE")
 		os.Exit(2)
 	}
 
@@ -87,7 +117,7 @@ func main() {
 		case *enableMode:
 			output, err = manager.SetFrameworkEnabled(true)
 		case *disableMode:
-			output, err = manager.Disable()
+			output, err = disableAndConverge(manager, *lockTimeout)
 		case *setWorkspaceMode:
 			if strings.TrimSpace(*workspace) == "" || strings.TrimSpace(*workspaceMode) == "" {
 				fmt.Fprintln(os.Stderr, "--set-workspace-mode requires --workspace and --workspace-mode")
@@ -177,6 +207,10 @@ func main() {
 		switch {
 		case request.Operation == "createCollaborationRun":
 			locks, lockErr = coordManager.AcquireRunLocks(stateDirForLock)
+		case request.Operation == "prepareCollaborationInstance":
+			locks, entry, lockErr = coordManager.AcquireRunLocksForRun(runID, gateEpoch)
+		case request.Operation == "registerCollaborationOwner":
+			locks, entry, lockErr = coordManager.AcquireRunLocksForRun(runID, gateEpoch)
 		case request.Operation == "prepareAttempt":
 			locks, entry, lockErr = coordManager.AcquireRunLocksForRun(runID, gateEpoch)
 		case request.Operation == "recordCollaborationTechnicalRelease":
@@ -235,6 +269,184 @@ func main() {
 		return
 	}
 	runLegacyGateway(request, root, config, *lockTimeout)
+}
+
+func disableAndConverge(manager *coordination.Manager, lockTimeout time.Duration) (coordination.DisableResult, error) {
+	result, err := manager.Disable()
+	if err != nil {
+		return result, err
+	}
+	for index := range result.Runs {
+		status := &result.Runs[index]
+		entry, found, lookupErr := manager.LookupRun(status.RunID)
+		if lookupErr != nil || !found {
+			status.Status = "outcome_unknown"
+			continue
+		}
+		attempts := entry.Attempts
+		if len(attempts) == 0 && entry.AttemptID != "" {
+			attempts = map[string]storage.ActiveAttemptEntry{entry.AttemptID: {AttemptID: entry.AttemptID, InstanceID: entry.InstanceID, OwnerPID: entry.OwnerPID, OwnerStartMarker: entry.OwnerStartMarker, OwnerEndpoint: entry.OwnerEndpoint, OwnerCapabilityHash: entry.OwnerCapabilityHash, OwnerStateDir: entry.OwnerStateDir}}
+		}
+		status.Status = "not_contacted"
+		for attemptID, attemptEntry := range attempts {
+			attemptStatus, convergenceErr := convergeDisabledAttempt(manager, entry, attemptEntry, attemptID, lockTimeout)
+			if convergenceErr != nil && attemptStatus == "" {
+				attemptStatus = "outcome_unknown"
+			}
+			attemptEntry.ShutdownStatus = attemptStatus
+			entry.Attempts[attemptID] = attemptEntry
+			if disableStatusPriority(attemptStatus) > disableStatusPriority(status.Status) {
+				status.Status = attemptStatus
+			}
+		}
+		locks, _, lockErr := manager.AcquireRunLocksForConvergence(entry.RunID)
+		if lockErr != nil {
+			status.Status = "outcome_unknown"
+			return result, fmt.Errorf("persist disable convergence for run %s: %w", entry.RunID, lockErr)
+		}
+		latest, found, lookupErr := manager.GetRunUnderLock(entry.RunID)
+		if lookupErr != nil || !found {
+			_ = locks.Release()
+			status.Status = "outcome_unknown"
+			if lookupErr != nil {
+				return result, fmt.Errorf("reload disable convergence for run %s: %w", entry.RunID, lookupErr)
+			}
+			return result, fmt.Errorf("reload disable convergence for run %s: active run is missing", entry.RunID)
+		}
+		latest.ShutdownStatus = status.Status
+		for attemptID, attempted := range entry.Attempts {
+			current := latest.Attempts[attemptID]
+			current.ShutdownStatus = attempted.ShutdownStatus
+			latest.Attempts[attemptID] = current
+		}
+		if updateErr := manager.UpdateRunUnderLock(latest); updateErr != nil {
+			_ = locks.Release()
+			status.Status = "outcome_unknown"
+			return result, fmt.Errorf("write disable convergence for run %s: %w", entry.RunID, updateErr)
+		}
+		if releaseErr := locks.Release(); releaseErr != nil {
+			status.Status = "outcome_unknown"
+			return result, fmt.Errorf("release disable convergence locks for run %s: %w", entry.RunID, releaseErr)
+		}
+	}
+	return result, nil
+}
+
+func convergeDisabledAttempt(manager *coordination.Manager, entry storage.ActiveRunEntry, attemptEntry storage.ActiveAttemptEntry, attemptID string, lockTimeout time.Duration) (string, error) {
+	locks, _, found, err := manager.AcquireRunLocksForAttempt(attemptID)
+	if err != nil || !found {
+		return "outcome_unknown", err
+	}
+	store, err := storage.New(entry.StateDir)
+	if err != nil {
+		_ = locks.Release()
+		return "outcome_unknown", err
+	}
+	core, err := gateway.NewWithCoordinationLocked(store, policy.DefaultConfig(), manager)
+	if err != nil {
+		_ = locks.Release()
+		return "outcome_unknown", err
+	}
+	cancel, err := core.RequestCancel(gateway.CancelInput{AttemptID: attemptID, Reason: "framework disabled"})
+	if err != nil {
+		if gatewayErr, ok := err.(*gateway.Error); ok && gatewayErr.Code == "cancel_not_allowed" {
+			attempt, getErr := core.GetAttempt(gateway.GetAttemptInput{AttemptID: attemptID})
+			if getErr != nil {
+				_ = locks.Release()
+				return "outcome_unknown", getErr
+			}
+			switch shutdownStatusForAttempt(attempt.Attempt.Status) {
+			case "cancelled":
+				_ = locks.Release()
+				return "cancelled", nil
+			case "cancel_pending":
+				_ = locks.Release()
+				return "cancel_pending", nil
+			case "contact_owner":
+				batch, pollErr := core.PollHostActions(gateway.PollHostActionsInput{AttemptID: attemptID, ControllerInstanceID: "disable-convergence"})
+				if pollErr != nil {
+					_ = locks.Release()
+					return "outcome_unknown", pollErr
+				}
+				for _, action := range batch.Actions {
+					if action.Kind == orchestration.ActionCancelHost {
+						cancel.Action = action
+						goto cancelReady
+					}
+				}
+				_ = locks.Release()
+				return "cancel_pending", nil
+			default:
+				_ = locks.Release()
+				return "outcome_unknown", nil
+			}
+		}
+		_ = locks.Release()
+		return "outcome_unknown", err
+	}
+cancelReady:
+	if err := locks.Release(); err != nil {
+		return "outcome_unknown", err
+	}
+	storeOwner, err := bridge.NewOwnerStore(attemptEntry.OwnerStateDir)
+	if err != nil {
+		return "not_contacted", err
+	}
+	receipt, found, err := storeOwner.Load(attemptID)
+	if err != nil {
+		return "not_contacted", err
+	}
+	if !found {
+		return "not_contacted", nil
+	}
+	if bridge.OwnerCapabilityHash(receipt) != attemptEntry.OwnerCapabilityHash {
+		return "stale_owner", nil
+	}
+	result, err := bridge.SendOwnerActionForConvergence(context.Background(), receipt, cancel.Action)
+	if err != nil {
+		return shutdownStatusForOwnerError(err), err
+	}
+	if result.Status == "cancelled" {
+		return "cancelled", nil
+	}
+	return "cancel_pending", nil
+}
+
+func shutdownStatusForAttempt(status orchestration.AttemptStatus) string {
+	switch status {
+	case orchestration.AttemptCompleted, orchestration.AttemptFailed, orchestration.AttemptTimedOut, orchestration.AttemptCancelled:
+		return "cancelled"
+	case orchestration.AttemptCancelUnconfirmed:
+		return "cancel_pending"
+	case orchestration.AttemptCancelRequested:
+		return "contact_owner"
+	default:
+		return "outcome_unknown"
+	}
+}
+
+func shutdownStatusForOwnerError(err error) string {
+	if err != nil && strings.HasPrefix(err.Error(), "stale_owner:") {
+		return "stale_owner"
+	}
+	return "outcome_unknown"
+}
+
+func disableStatusPriority(status string) int {
+	switch status {
+	case "outcome_unknown":
+		return 4
+	case "stale_owner":
+		return 3
+	case "cancel_pending":
+		return 2
+	case "not_contacted":
+		return 2
+	case "cancelled":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func runLegacyGateway(request protocol.Request, root string, config policy.Config, lockTimeout time.Duration) {
@@ -296,6 +508,16 @@ func classifyCollaborationRequest(request protocol.Request) (bool, string, strin
 			return false, "", "", 0, "", nil
 		}
 		return true, "", raw.CollaborationRunID, raw.GateEpoch, "", nil
+	case "prepareCollaborationInstance":
+		if raw.RunID == "" {
+			return false, "", "", 0, "", nil
+		}
+		return true, "", raw.RunID, raw.GateEpoch, "", nil
+	case "registerCollaborationOwner":
+		if raw.RunID == "" {
+			return false, "", "", 0, "", nil
+		}
+		return true, "", raw.RunID, raw.GateEpoch, "", nil
 	case "recordCollaborationTechnicalRelease":
 		return true, "", raw.RunID, 0, "", nil
 	case "requestCompletion":

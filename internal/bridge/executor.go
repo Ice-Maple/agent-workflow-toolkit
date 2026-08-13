@@ -89,7 +89,7 @@ func (e Executor) Execute(ctx context.Context) (ExecutionOutput, error) {
 	if err != nil {
 		return ExecutionOutput{}, err
 	}
-	request, err := e.requestFor(attempt, action)
+	request, err := e.requestFor(attempt, action, batch.CollaborationRunID, batch.CollaborationInstance, batch.GateEpoch)
 	if err != nil {
 		return ExecutionOutput{}, err
 	}
@@ -131,7 +131,7 @@ func (e Executor) Execute(ctx context.Context) (ExecutionOutput, error) {
 	return ExecutionOutput{SchemaVersion: BridgeSchema, AttemptID: attempt.ID, ActionID: action.ID, ActionKind: action.Kind, Owner: publicOwnerReceipt(updated), Result: &result}, nil
 }
 
-func (e Executor) requestFor(attempt orchestration.Attempt, action orchestration.HostAction) (Request, error) {
+func (e Executor) requestFor(attempt orchestration.Attempt, action orchestration.HostAction, runID, instanceID string, gateEpoch uint64) (Request, error) {
 	if e.Profile.ID == "" || attempt.Binding.ProfileID == "" || e.Profile.ID != attempt.Binding.ProfileID {
 		return Request{}, errors.New("adapter profile does not match the frozen Attempt binding")
 	}
@@ -148,7 +148,7 @@ func (e Executor) requestFor(attempt orchestration.Attempt, action orchestration
 	if !samePath(attempt.Binding.Workspace, actionString(action.Parameters, "workspace")) && actionString(action.Parameters, "workspace") != "" {
 		return Request{}, errors.New("core action workspace mismatch")
 	}
-	return Request{SchemaVersion: BridgeSchema, AttemptID: attempt.ID, ControllerInstanceID: e.ControllerInstanceID, Action: action, Attempt: attempt, Profile: e.Profile, ExpectedProfileHash: expectedHash, RolePromptHash: actionString(action.Parameters, "role_prompt_hash")}, nil
+	return Request{SchemaVersion: BridgeSchema, AttemptID: attempt.ID, ControllerInstanceID: e.ControllerInstanceID, CollaborationRunID: runID, CollaborationInstanceID: instanceID, GateEpoch: gateEpoch, Action: action, Attempt: attempt, Profile: e.Profile, ExpectedProfileHash: expectedHash, RolePromptHash: actionString(action.Parameters, "role_prompt_hash")}, nil
 }
 
 func selectAction(actions []orchestration.HostAction, actionID string, kind orchestration.ActionKind) (orchestration.HostAction, error) {
@@ -181,6 +181,12 @@ func validateOwnerForRequest(receipt OwnerReceipt, request Request) error {
 	}
 	if !isLoopbackEndpoint(receipt.Endpoint) {
 		return errors.New("owner_mismatch: owner endpoint is not loopback")
+	}
+	if receipt.OwnerPID <= 0 || strings.TrimSpace(receipt.OwnerStartMarker) == "" || strings.TrimSpace(receipt.Capability) == "" {
+		return errors.New("owner_mismatch: owner process identity or capability is missing")
+	}
+	if running, err := processIdentityMatches(receipt.OwnerPID, receipt.OwnerStartMarker); err != nil || !running {
+		return errors.New("stale_owner: owner PID/start marker no longer identifies the original process")
 	}
 	return nil
 }

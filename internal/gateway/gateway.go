@@ -122,9 +122,12 @@ type PollHostActionsInput struct {
 }
 
 type HostActionBatch struct {
-	AttemptID string                     `json:"attempt_id"`
-	Attempt   orchestration.Attempt      `json:"attempt"`
-	Actions   []orchestration.HostAction `json:"actions"`
+	AttemptID             string                     `json:"attempt_id"`
+	Attempt               orchestration.Attempt      `json:"attempt"`
+	Actions               []orchestration.HostAction `json:"actions"`
+	CollaborationRunID    string                     `json:"collaboration_run_id,omitempty"`
+	CollaborationInstance string                     `json:"collaboration_instance_id,omitempty"`
+	GateEpoch             uint64                     `json:"gate_epoch,omitempty"`
 }
 
 type GetAttemptInput struct {
@@ -132,8 +135,11 @@ type GetAttemptInput struct {
 }
 
 type GetAttemptResult struct {
-	Attempt orchestration.Attempt      `json:"attempt"`
-	Node    orchestration.WorkflowNode `json:"node"`
+	Attempt               orchestration.Attempt      `json:"attempt"`
+	Node                  orchestration.WorkflowNode `json:"node"`
+	CollaborationRunID    string                     `json:"collaboration_run_id,omitempty"`
+	CollaborationInstance string                     `json:"collaboration_instance_id,omitempty"`
+	GateEpoch             uint64                     `json:"gate_epoch,omitempty"`
 }
 
 type SubmitHostActionResultInput struct {
@@ -188,6 +194,50 @@ type CreateCollaborationRunResult struct {
 	Run       orchestration.CollaborationRun `json:"run"`
 	StepRuns  []orchestration.StepRun        `json:"step_runs"`
 	Instances []orchestration.InstanceRun    `json:"instances"`
+}
+
+// PrepareCollaborationInstanceInput admits one ready role-first instance into
+// the existing Gateway node/preflight contract. It deliberately does not
+// create an Attempt: the caller must still run the selected external/native
+// host preflight before PrepareAttempt can issue a launch action.
+type PrepareCollaborationInstanceInput struct {
+	RunID          string                       `json:"run_id"`
+	InstanceID     string                       `json:"instance_id"`
+	GateEpoch      uint64                       `json:"gate_epoch"`
+	Kind           string                       `json:"kind,omitempty"`
+	ExpectedOutput orchestration.ExpectedOutput `json:"expected_output,omitempty"`
+}
+
+type PrepareCollaborationInstanceResult struct {
+	Run            orchestration.CollaborationRun `json:"run"`
+	Instance       orchestration.InstanceRun      `json:"instance"`
+	Node           orchestration.WorkflowNode     `json:"node"`
+	Binding        orchestration.Binding          `json:"binding"`
+	RoleDefinition orchestration.RoleDefinition   `json:"role_definition"`
+	StepTask       string                         `json:"step_task"`
+	Preflight      policy.PreflightDecision       `json:"preflight"`
+}
+
+// RegisterCollaborationOwnerInput updates only the machine-local active-run
+// lookup after a bridge owner has published its loopback endpoint. Provider
+// handles and raw output stay in the task/bridge owner records; this index is
+// only a disable/recovery routing hint.
+type RegisterCollaborationOwnerInput struct {
+	RunID               string `json:"run_id"`
+	InstanceID          string `json:"instance_id"`
+	AttemptID           string `json:"attempt_id"`
+	GateEpoch           uint64 `json:"gate_epoch"`
+	OwnerPID            int    `json:"owner_pid"`
+	OwnerStartMarker    string `json:"owner_start_marker"`
+	OwnerEndpoint       string `json:"owner_endpoint"`
+	OwnerCapabilityHash string `json:"owner_capability_hash"`
+	OwnerStateDir       string `json:"owner_state_dir"`
+	LastActionID        string `json:"last_action_id,omitempty"`
+	LastActionSequence  int    `json:"last_action_sequence,omitempty"`
+}
+
+type RegisterCollaborationOwnerResult struct {
+	Entry storage.ActiveRunEntry `json:"entry"`
 }
 
 type ResolveRoleInput struct {
@@ -341,7 +391,7 @@ func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (Cre
 	planHash := hashJSON(input.Plan)
 	runID := orchestration.NewID("run")
 	now := time.Now().UTC()
-	run := orchestration.CollaborationRun{ID: runID, TaskID: state.Task.ID, RevisionID: input.RevisionID, PlanHash: planHash, RolePromptHashes: copyStringMap(input.RolePromptHashes), Plan: input.Plan, Workspace: state.Task.Workspace, EffectiveMode: input.EffectiveMode, GateEpoch: input.GateEpoch, SchedulerAuthorityID: orchestration.NewID("scheduler"), Status: orchestration.CollaborationRunActive, CreatedAt: now, UpdatedAt: now}
+	run := orchestration.CollaborationRun{ID: runID, TaskID: state.Task.ID, RevisionID: input.RevisionID, PlanHash: planHash, RolePromptHashes: copyStringMap(rolePromptHashes), Plan: input.Plan, Workspace: state.Task.Workspace, EffectiveMode: input.EffectiveMode, GateEpoch: input.GateEpoch, SchedulerAuthorityID: orchestration.NewID("scheduler"), Status: orchestration.CollaborationRunActive, CreatedAt: now, UpdatedAt: now}
 	stepRuns := make([]orchestration.StepRun, 0, len(input.Plan.Steps))
 	instances := make([]orchestration.InstanceRun, 0)
 	state.CollaborationRuns[run.ID] = run
@@ -362,7 +412,11 @@ func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (Cre
 		state.StepRuns[stepRun.ID] = stepRun
 		stepRuns = append(stepRuns, stepRun)
 		for index := 0; index < count; index++ {
-			instance := orchestration.InstanceRun{ID: orchestration.NewID("instance"), RunID: run.ID, StepRunID: stepRun.ID, StepID: spec.ID, Role: spec.Role, RolePromptHash: input.Plan.RolePromptHashes[spec.Role], Status: orchestration.InstanceWaiting, CreatedAt: now, UpdatedAt: now}
+			binding, bindingErr := g.config.ResolveRole(spec.Role, run.Workspace)
+			if bindingErr != nil {
+				return CreateCollaborationRunResult{}, fail("role_route_missing", bindingErr.Error(), map[string]any{"role": spec.Role})
+			}
+			instance := orchestration.InstanceRun{ID: orchestration.NewID("instance"), RunID: run.ID, StepRunID: stepRun.ID, StepID: spec.ID, Role: spec.Role, RolePromptHash: input.Plan.RolePromptHashes[spec.Role], Binding: binding, Status: orchestration.InstanceWaiting, CreatedAt: now, UpdatedAt: now}
 			if status == orchestration.StepRunReady {
 				instance.Status = orchestration.InstanceReady
 			}
@@ -384,6 +438,156 @@ func (g *Gateway) CreateCollaborationRun(input CreateCollaborationRunInput) (Cre
 		}
 	}
 	return CreateCollaborationRunResult{Run: run, StepRuns: stepRuns, Instances: instances}, nil
+}
+
+// PrepareCollaborationInstance expands one ready role-first instance into the
+// existing WorkflowNode/preflight model. The operation is intentionally
+// separate from PrepareAttempt so a consumer can run the selected Native or
+// external Adapter preflight before any HostAction is issued.
+func (g *Gateway) PrepareCollaborationInstance(input PrepareCollaborationInstanceInput) (PrepareCollaborationInstanceResult, error) {
+	if strings.TrimSpace(input.RunID) == "" || strings.TrimSpace(input.InstanceID) == "" {
+		return PrepareCollaborationInstanceResult{}, fail("collaboration_instance_required", "run_id and instance_id are required", nil)
+	}
+	if input.GateEpoch == 0 {
+		return PrepareCollaborationInstanceResult{}, fail("gate_epoch_required", "framework collaboration requires the current machine gate epoch", nil)
+	}
+	if err := g.checkCollaborationRunAdmission(input.RunID, input.GateEpoch); err != nil {
+		return PrepareCollaborationInstanceResult{}, err
+	}
+	state, err := g.findState(func(candidate storage.State) bool {
+		_, ok := candidate.CollaborationRuns[input.RunID]
+		return ok
+	})
+	if err != nil {
+		return PrepareCollaborationInstanceResult{}, fail("unknown_collaboration_run", "collaboration run was not found", nil)
+	}
+	run, ok := state.CollaborationRuns[input.RunID]
+	if !ok || run.Status != orchestration.CollaborationRunActive {
+		return PrepareCollaborationInstanceResult{}, fail("collaboration_run_not_active", "collaboration run is not active", nil)
+	}
+	if run.GateEpoch != input.GateEpoch || state.Task.CurrentRevisionID != run.RevisionID || run.PlanHash != hashJSON(run.Plan) {
+		return PrepareCollaborationInstanceResult{}, fail("collaboration_plan_changed", "the task revision or frozen collaboration plan no longer matches", nil)
+	}
+	instance, ok := state.InstanceRuns[input.InstanceID]
+	if !ok || instance.RunID != run.ID {
+		return PrepareCollaborationInstanceResult{}, fail("unknown_collaboration_instance", "instance does not belong to the collaboration run", nil)
+	}
+	step, ok := collaborationStep(run.Plan, instance.StepID)
+	if !ok {
+		return PrepareCollaborationInstanceResult{}, fail("collaboration_step_missing", "instance step is not present in the frozen plan", nil)
+	}
+	definition, err := g.config.RoleDefinition(instance.Role)
+	if err != nil {
+		return PrepareCollaborationInstanceResult{}, fail("role_registry_rejected", err.Error(), map[string]any{"role": instance.Role})
+	}
+	if expected := strings.TrimSpace(run.RolePromptHashes[instance.Role]); expected == "" || !strings.EqualFold(expected, definition.PromptHash) {
+		return PrepareCollaborationInstanceResult{}, fail("role_prompt_hash_mismatch", "instance Role Prompt hash does not match the frozen run", nil)
+	}
+
+	if instance.NodeID != "" {
+		node, nodeOK := state.Nodes[instance.NodeID]
+		if !nodeOK || node.TaskID != run.TaskID || node.RevisionID != run.RevisionID || node.Role != instance.Role {
+			return PrepareCollaborationInstanceResult{}, fail("collaboration_mapping_invalid", "instance node mapping is not valid for the frozen run", nil)
+		}
+		if !reflect.DeepEqual(input.ExpectedOutput, node.ExpectedOutput) && !isZeroExpectedOutput(input.ExpectedOutput) {
+			return PrepareCollaborationInstanceResult{}, fail("collaboration_output_contract_changed", "instance expected output cannot change after node admission", nil)
+		}
+		binding := instance.Binding
+		if node.ApprovedBinding != nil {
+			binding = *node.ApprovedBinding
+		}
+		preflight := policy.PreflightDecision{Status: node.PreflightStatus, Code: node.PreflightCode, MCPIsolation: node.PreflightMCPIsolation, Binding: binding}
+		return PrepareCollaborationInstanceResult{Run: run, Instance: instance, Node: node, Binding: binding, RoleDefinition: definition, StepTask: step.Task, Preflight: preflight}, nil
+	}
+	if instance.Status != orchestration.InstanceReady {
+		return PrepareCollaborationInstanceResult{}, fail("collaboration_instance_not_ready", "collaboration instance is not ready", nil)
+	}
+	binding, err := g.config.ResolveRole(instance.Role, run.Workspace)
+	if err != nil {
+		return PrepareCollaborationInstanceResult{}, fail("role_route_missing", err.Error(), map[string]any{"role": instance.Role})
+	}
+	preflight := g.config.Preflight(state.Task, binding)
+	now := time.Now().UTC()
+	kind := strings.TrimSpace(input.Kind)
+	if kind == "" {
+		kind = "collaboration:" + instance.StepID
+	}
+	node := orchestration.WorkflowNode{ID: orchestration.NewID("node"), TaskID: run.TaskID, RevisionID: run.RevisionID, Kind: kind, Role: instance.Role, Status: orchestration.NodeProposed, CheckpointMode: state.Task.CheckpointMode, ExpectedOutput: input.ExpectedOutput, CreatedAt: now, UpdatedAt: now}
+	node.PreflightStatus = preflight.Status
+	node.PreflightCode = preflight.Code
+	node.PreflightMCPIsolation = selectedMCPIsolation(preflight.MCPIsolation)
+	if preflight.Status == "passed" {
+		approved := preflight.Binding
+		node.ApprovedBinding = &approved
+		node.Status = orchestration.NodePrepared
+	}
+	state.Nodes[node.ID] = node
+	instance.NodeID = node.ID
+	instance.Binding = preflight.Binding
+	instance.UpdatedAt = now
+	state.InstanceRuns[instance.ID] = instance
+	event := orchestration.NewEvent(state.Task.ID, "collaboration.instance.admitted", map[string]any{
+		"run_id": input.RunID, "instance_id": instance.ID, "node_id": node.ID,
+		"step_id": instance.StepID, "role": instance.Role, "preflight_status": preflight.Status, "preflight_code": preflight.Code,
+	})
+	event.NodeID = node.ID
+	if err := g.saveEvents(state, event); err != nil {
+		return PrepareCollaborationInstanceResult{}, err
+	}
+	return PrepareCollaborationInstanceResult{Run: run, Instance: instance, Node: node, Binding: preflight.Binding, RoleDefinition: definition, StepTask: step.Task, Preflight: preflight}, nil
+}
+
+func (g *Gateway) RegisterCollaborationOwner(input RegisterCollaborationOwnerInput) (RegisterCollaborationOwnerResult, error) {
+	if strings.TrimSpace(input.RunID) == "" || strings.TrimSpace(input.InstanceID) == "" || strings.TrimSpace(input.AttemptID) == "" {
+		return RegisterCollaborationOwnerResult{}, fail("collaboration_owner_identity_required", "run_id, instance_id and attempt_id are required", nil)
+	}
+	if input.GateEpoch == 0 {
+		return RegisterCollaborationOwnerResult{}, fail("gate_epoch_required", "owner registration requires the current machine gate epoch", nil)
+	}
+	if input.OwnerPID <= 0 || strings.TrimSpace(input.OwnerStartMarker) == "" || strings.TrimSpace(input.OwnerEndpoint) == "" || strings.TrimSpace(input.OwnerCapabilityHash) == "" || strings.TrimSpace(input.OwnerStateDir) == "" {
+		return RegisterCollaborationOwnerResult{}, fail("collaboration_owner_identity_required", "owner pid, start marker, endpoint, capability hash and state directory are required", nil)
+	}
+	if err := g.checkCollaborationRunAdmission(input.RunID, input.GateEpoch); err != nil {
+		return RegisterCollaborationOwnerResult{}, err
+	}
+	state, err := g.findState(func(candidate storage.State) bool {
+		_, ok := candidate.CollaborationRuns[input.RunID]
+		return ok
+	})
+	if err != nil {
+		return RegisterCollaborationOwnerResult{}, fail("unknown_collaboration_run", "collaboration run was not found", nil)
+	}
+	run, ok := state.CollaborationRuns[input.RunID]
+	if !ok || run.Status != orchestration.CollaborationRunActive || run.GateEpoch != input.GateEpoch {
+		return RegisterCollaborationOwnerResult{}, fail("collaboration_admission_rejected", "owner registration does not match an active collaboration run", nil)
+	}
+	instance, ok := state.InstanceRuns[input.InstanceID]
+	if !ok || instance.RunID != run.ID || instance.AttemptID != input.AttemptID {
+		return RegisterCollaborationOwnerResult{}, fail("collaboration_owner_mismatch", "owner registration does not match the frozen instance Attempt", nil)
+	}
+	attempt, ok := state.Attempts[input.AttemptID]
+	if !ok || attempt.TaskID != run.TaskID || attempt.ID != instance.AttemptID {
+		return RegisterCollaborationOwnerResult{}, fail("collaboration_owner_mismatch", "owner registration Attempt was not found in the run", nil)
+	}
+	entry, found, err := g.coordination.GetRunUnderLock(run.ID)
+	if err != nil {
+		return RegisterCollaborationOwnerResult{}, err
+	}
+	if !found || canonicalPathForCompare(entry.StateDir) != canonicalPathForCompare(g.store.Root()) {
+		return RegisterCollaborationOwnerResult{}, fail("collaboration_owner_mismatch", "active-run index does not match the Attempt state-dir", nil)
+	}
+	if entry.Attempts == nil {
+		entry.Attempts = map[string]storage.ActiveAttemptEntry{}
+	}
+	entry.Attempts[attempt.ID] = storage.ActiveAttemptEntry{AttemptID: attempt.ID, InstanceID: instance.ID, OwnerPID: input.OwnerPID, OwnerStartMarker: input.OwnerStartMarker, OwnerEndpoint: input.OwnerEndpoint, OwnerCapabilityHash: input.OwnerCapabilityHash, OwnerStateDir: input.OwnerStateDir, LastActionID: input.LastActionID, LastActionSequence: input.LastActionSequence, ShutdownStatus: "active"}
+	entry.AttemptID, entry.InstanceID = attempt.ID, instance.ID
+	entry.OwnerPID, entry.OwnerStartMarker, entry.OwnerEndpoint = input.OwnerPID, input.OwnerStartMarker, input.OwnerEndpoint
+	entry.OwnerCapabilityHash, entry.OwnerStateDir = input.OwnerCapabilityHash, input.OwnerStateDir
+	entry.LastActionID, entry.LastActionSequence = input.LastActionID, input.LastActionSequence
+	if err := g.coordination.UpdateRunUnderLock(entry); err != nil {
+		return RegisterCollaborationOwnerResult{}, err
+	}
+	return RegisterCollaborationOwnerResult{Entry: entry}, nil
 }
 
 func (g *Gateway) RecordCollaborationTechnicalRelease(input TechnicalReleaseInput) (TechnicalReleaseResult, error) {
@@ -416,6 +620,9 @@ func (g *Gateway) RecordCollaborationTechnicalRelease(input TechnicalReleaseInpu
 	instance, ok := state.InstanceRuns[input.InstanceID]
 	if !ok || instance.RunID != run.ID {
 		return TechnicalReleaseResult{}, fail("unknown_collaboration_instance", "instance does not belong to the collaboration run", nil)
+	}
+	if instance.Status != orchestration.InstanceAwaitingBusiness {
+		return TechnicalReleaseResult{}, fail("technical_release_ineligible", "instance is not at its collaboration completion checkpoint", nil)
 	}
 	if instance.AttemptID == "" || instance.NodeID == "" {
 		return TechnicalReleaseResult{}, fail("instance_not_executed", "instance is not mapped to a Gateway node and attempt", nil)
@@ -480,7 +687,7 @@ func (g *Gateway) RecordCollaborationTechnicalRelease(input TechnicalReleaseInpu
 		if err := g.coordination.RemoveRunUnderLock(run.ID); err != nil {
 			return TechnicalReleaseResult{}, err
 		}
-	} else if err := g.updateCollaborationIndex(run.ID, "", "", "", 0, true); err != nil {
+	} else if err := g.updateCollaborationIndex(run.ID, attempt.ID, instance.ID, "", 0, true); err != nil {
 		return TechnicalReleaseResult{}, err
 	}
 	return TechnicalReleaseResult{Release: release, Instance: instance, NextReady: ready}, nil
@@ -574,6 +781,19 @@ func validateCollaborationPlan(plan orchestration.CollaborationPlan) error {
 		}
 	}
 	return nil
+}
+
+func collaborationStep(plan orchestration.CollaborationPlan, stepID string) (orchestration.CollaborationStepSpec, bool) {
+	for _, step := range plan.Steps {
+		if step.ID == stepID {
+			return step, true
+		}
+	}
+	return orchestration.CollaborationStepSpec{}, false
+}
+
+func isZeroExpectedOutput(output orchestration.ExpectedOutput) bool {
+	return output.Format == "" && output.ArtifactPath == "" && !output.Required && output.MinBytes == 0 && len(output.RequiredSections) == 0
 }
 
 func (g *Gateway) validateCollaborationRoles(workspace string, plan orchestration.CollaborationPlan) error {
@@ -746,11 +966,26 @@ func (g *Gateway) updateCollaborationIndex(runID string, attemptID, instanceID, 
 		return errors.New("collaboration run is not active")
 	}
 	if clearAttempt {
-		entry.AttemptID = ""
-		entry.InstanceID = ""
+		delete(entry.Attempts, attemptID)
+		if entry.AttemptID == attemptID {
+			entry.AttemptID = ""
+			entry.InstanceID = ""
+		}
 	} else {
 		entry.AttemptID = attemptID
 		entry.InstanceID = instanceID
+		if entry.Attempts == nil {
+			entry.Attempts = map[string]storage.ActiveAttemptEntry{}
+		}
+		attemptEntry := entry.Attempts[attemptID]
+		attemptEntry.AttemptID, attemptEntry.InstanceID = attemptID, instanceID
+		if attemptEntry.ShutdownStatus == "" {
+			attemptEntry.ShutdownStatus = "active"
+		}
+		if actionID != "" {
+			attemptEntry.LastActionID, attemptEntry.LastActionSequence = actionID, sequence
+		}
+		entry.Attempts[attemptID] = attemptEntry
 	}
 	if actionID != "" {
 		entry.LastActionID = actionID
@@ -893,6 +1128,18 @@ func (g *Gateway) dispatch(operation string, raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return g.CreateCollaborationRun(input)
+	case "prepareCollaborationInstance":
+		var input PrepareCollaborationInstanceInput
+		if err := decodePayload(raw, &input); err != nil {
+			return nil, err
+		}
+		return g.PrepareCollaborationInstance(input)
+	case "registerCollaborationOwner":
+		var input RegisterCollaborationOwnerInput
+		if err := decodePayload(raw, &input); err != nil {
+			return nil, err
+		}
+		return g.RegisterCollaborationOwner(input)
 	case "resolveRole":
 		var input ResolveRoleInput
 		if err := decodePayload(raw, &input); err != nil {
@@ -1172,7 +1419,11 @@ func (g *Gateway) PrepareAttempt(input PrepareAttemptInput) (LaunchDecision, err
 		instance.Status = orchestration.InstanceRunning
 		instance.UpdatedAt = time.Now().UTC()
 		state.InstanceRuns[input.InstanceRunID] = instance
-		state.CollaborationRuns[input.CollaborationRunID] = state.CollaborationRuns[input.CollaborationRunID]
+		if stepRun, stepOK := state.StepRuns[instance.StepRunID]; stepOK {
+			stepRun.Status = orchestration.StepRunRunning
+			stepRun.UpdatedAt = instance.UpdatedAt
+			state.StepRuns[stepRun.ID] = stepRun
+		}
 		if err := g.saveState(state); err != nil {
 			return LaunchDecision{}, err
 		}
@@ -1282,6 +1533,14 @@ func (g *Gateway) prepareAttempt(state storage.State, node orchestration.Workflo
 			rolePromptHash = definition.PromptHash
 		}
 	}
+	if generated, collaboration, promptErr := g.collaborationDispatchPrompt(state, node, attempt); promptErr != nil {
+		return LaunchDecision{}, promptErr
+	} else if collaboration {
+		if strings.TrimSpace(dispatchPrompt) != "" && dispatchPrompt != generated {
+			return LaunchDecision{}, fail("dispatch_prompt_mismatch", "collaboration dispatch prompt must be generated from the frozen Role Prompt and step payload", nil)
+		}
+		dispatchPrompt = generated
+	}
 	if dispatchPrompt = strings.TrimSpace(dispatchPrompt); dispatchPrompt == "" {
 		dispatchPrompt = fmt.Sprintf("我将发送当前任务给 %s（%s / %s / reasoning=%s）进行处理。", attempt.Binding.Role, attempt.Binding.Adapter, attempt.Binding.Model, attempt.Binding.Reasoning)
 	}
@@ -1314,6 +1573,104 @@ func (g *Gateway) prepareAttempt(state storage.State, node orchestration.Workflo
 	return LaunchDecision{Attempt: attempt, LaunchAction: action, DispatchPrompt: dispatchPrompt}, nil
 }
 
+// collaborationDispatchPrompt is the single v1 prompt composition boundary:
+// framework identity, the verified Role Prompt and the frozen step payload
+// are combined before the launch action is signed. It returns collaboration=
+// false for legacy nodes so their existing caller-supplied/generic prompt
+// behavior remains compatible.
+func (g *Gateway) collaborationDispatchPrompt(state storage.State, node orchestration.WorkflowNode, attempt orchestration.Attempt) (prompt string, collaboration bool, err error) {
+	var instance orchestration.InstanceRun
+	found := false
+	for _, candidate := range state.InstanceRuns {
+		if candidate.RunID == "" || candidate.NodeID != node.ID || candidate.AttemptID != "" && candidate.AttemptID != attempt.ID {
+			continue
+		}
+		instance = candidate
+		found = true
+		break
+	}
+	if !found {
+		return "", false, nil
+	}
+	run, ok := state.CollaborationRuns[instance.RunID]
+	if !ok || run.TaskID != state.Task.ID || run.RevisionID != node.RevisionID {
+		return "", true, fail("collaboration_mapping_invalid", "Attempt is not attached to its frozen collaboration run", nil)
+	}
+	definition, err := g.config.RoleDefinition(instance.Role)
+	if err != nil {
+		return "", true, fail("role_registry_rejected", err.Error(), map[string]any{"role": instance.Role})
+	}
+	expectedHash := strings.TrimSpace(run.RolePromptHashes[instance.Role])
+	if expectedHash == "" || !strings.EqualFold(expectedHash, definition.PromptHash) {
+		return "", true, fail("role_prompt_hash_mismatch", "collaboration Role Prompt hash does not match the frozen run", nil)
+	}
+	if strings.TrimSpace(definition.PromptPath) == "" {
+		return "", true, fail("role_prompt_unavailable", "the verified collaboration Role Prompt has no local prompt path", nil)
+	}
+	raw, readErr := os.ReadFile(filepath.Clean(definition.PromptPath))
+	if readErr != nil {
+		return "", true, fail("role_prompt_unavailable", "the verified collaboration Role Prompt cannot be read", nil)
+	}
+	if !strings.EqualFold(expectedHash, hashBytes(raw)) {
+		return "", true, fail("role_prompt_changed", "the collaboration Role Prompt changed after registry admission", nil)
+	}
+	step, ok := collaborationStep(run.Plan, instance.StepID)
+	if !ok {
+		return "", true, fail("collaboration_step_missing", "Attempt step is not present in the frozen collaboration plan", nil)
+	}
+	outputRequirements := "{}"
+	if rawOutput, marshalErr := json.Marshal(node.ExpectedOutput); marshalErr == nil {
+		outputRequirements = string(rawOutput)
+	}
+	rolePrompt := string(raw)
+	rolePrompt = strings.ReplaceAll(rolePrompt, "{{ task }}", step.Task)
+	rolePrompt = strings.ReplaceAll(rolePrompt, "{{task}}", step.Task)
+	rolePrompt = strings.ReplaceAll(rolePrompt, "{{ output_requirements }}", outputRequirements)
+	rolePrompt = strings.ReplaceAll(rolePrompt, "{{output_requirements}}", outputRequirements)
+	inputs, inputErr := collaborationDependencyInputs(state, run.ID, step.After)
+	if inputErr != nil {
+		return "", true, inputErr
+	}
+	rolePrompt = strings.ReplaceAll(rolePrompt, "{{ inputs }}", inputs)
+	rolePrompt = strings.ReplaceAll(rolePrompt, "{{inputs}}", inputs)
+	prompt = fmt.Sprintf("Framework envelope (collaboration/v1):\nrun_id=%s\nstep_id=%s\ninstance_id=%s\ntask_id=%s\nrole=%s\nrole_prompt_hash=%s\ntask_canary=%s\n\n%s\n\nStep payload:\n%s\n\nUpstream outputs:\n%s\n\nOutput requirements:\n%s", run.ID, instance.StepID, instance.ID, attempt.TaskID, instance.Role, expectedHash, attempt.TaskCanary, rolePrompt, step.Task, inputs, outputRequirements)
+	return prompt, true, nil
+}
+
+func collaborationDependencyInputs(state storage.State, runID string, dependencies []string) (string, error) {
+	if len(dependencies) == 0 {
+		return "[]", nil
+	}
+	type upstream struct {
+		StepID     string                      `json:"step_id"`
+		InstanceID string                      `json:"instance_id"`
+		Outputs    []orchestration.ArtifactRef `json:"outputs"`
+	}
+	items := make([]upstream, 0)
+	for _, dependency := range dependencies {
+		for _, instance := range state.InstanceRuns {
+			if instance.RunID != runID || instance.StepID != dependency {
+				continue
+			}
+			if instance.Status != orchestration.InstanceTechnicallyDone {
+				return "", fail("collaboration_dependency_blocked", "upstream instance is not technically released", map[string]any{"step_id": dependency})
+			}
+			items = append(items, upstream{StepID: dependency, InstanceID: instance.ID, Outputs: append([]orchestration.ArtifactRef(nil), instance.OutputRefs...)})
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].StepID != items[j].StepID {
+			return items[i].StepID < items[j].StepID
+		}
+		return items[i].InstanceID < items[j].InstanceID
+	})
+	raw, err := json.Marshal(items)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
 func (g *Gateway) PollHostActions(input PollHostActionsInput) (HostActionBatch, error) {
 	indexed, active, err := g.collaborationAttemptState(input.AttemptID)
 	if err != nil {
@@ -1340,7 +1697,7 @@ func (g *Gateway) PollHostActions(input PollHostActionsInput) (HostActionBatch, 
 		if attempt.Status == orchestration.AttemptCancelRequested && action.Kind != orchestration.ActionCancelHost {
 			continue
 		}
-		if indexed && !active && action.Kind == orchestration.ActionLaunch {
+		if indexed && !active && action.Kind != orchestration.ActionCancelHost {
 			continue
 		}
 		if !knownActionKind(action.Kind) {
@@ -1370,7 +1727,19 @@ func (g *Gateway) PollHostActions(input PollHostActionsInput) (HostActionBatch, 
 			return HostActionBatch{}, err
 		}
 	}
-	return HostActionBatch{AttemptID: attempt.ID, Attempt: attempt, Actions: sortActions(actions)}, nil
+	batch := HostActionBatch{AttemptID: attempt.ID, Attempt: attempt, Actions: sortActions(actions)}
+	for _, instance := range state.InstanceRuns {
+		if instance.AttemptID != attempt.ID {
+			continue
+		}
+		if run, ok := state.CollaborationRuns[instance.RunID]; ok {
+			batch.CollaborationRunID = run.ID
+			batch.CollaborationInstance = instance.ID
+			batch.GateEpoch = run.GateEpoch
+		}
+		break
+	}
+	return batch, nil
 }
 
 // GetAttempt returns the frozen Attempt and its owning node without exposing
@@ -1383,7 +1752,19 @@ func (g *Gateway) GetAttempt(input GetAttemptInput) (GetAttemptResult, error) {
 		return GetAttemptResult{}, err
 	}
 	node := state.Nodes[attempt.NodeID]
-	return GetAttemptResult{Attempt: attempt, Node: node}, nil
+	result := GetAttemptResult{Attempt: attempt, Node: node}
+	for _, instance := range state.InstanceRuns {
+		if instance.AttemptID != attempt.ID {
+			continue
+		}
+		if run, ok := state.CollaborationRuns[instance.RunID]; ok {
+			result.CollaborationRunID = run.ID
+			result.CollaborationInstance = instance.ID
+			result.GateEpoch = run.GateEpoch
+		}
+		break
+	}
+	return result, nil
 }
 
 func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (ActionReceipt, error) {
@@ -1545,6 +1926,9 @@ func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (Act
 			next = append(next, cancel)
 		} else {
 			attempt.Status = orchestration.AttemptRunning
+			observe := g.issueAction(state, attempt, orchestration.ActionObserve, map[string]any{"provider_handle": attempt.ProviderHandle}, action.ControllerInstanceID)
+			state.Actions[observe.ID] = observe
+			next = append(next, observe)
 		}
 	case orchestration.ActionCancelHost:
 		if attempt.Status == orchestration.AttemptContaminated {
@@ -1710,6 +2094,11 @@ func (g *Gateway) RequestCompletion(input CompletionInput) (CompletionResult, er
 			return CompletionResult{}, err
 		}
 	}
+	var collaborationInstance *orchestration.InstanceRun
+	if input.CollaborationRunID != "" {
+		instance := state.InstanceRuns[input.InstanceRunID]
+		collaborationInstance = &instance
+	}
 	decision := orchestration.CompletionDecision{ID: orchestration.NewID("completion"), AttemptID: attempt.ID, Status: attempt.Status, CreatedAt: time.Now().UTC()}
 	if attempt.Status != orchestration.AttemptCompleted {
 		decision.Status = orchestration.AttemptIncomplete
@@ -1753,6 +2142,16 @@ func (g *Gateway) RequestCompletion(input CompletionInput) (CompletionResult, er
 		node.Status = orchestration.NodeAwaitingHumanDecision
 		node.CheckpointAttemptID = attempt.ID
 		state.Task.Status = orchestration.TaskAwaitingHumanDecision
+	}
+	if collaborationInstance != nil {
+		if decision.Status == orchestration.AttemptCompleted {
+			collaborationInstance.Status = orchestration.InstanceAwaitingBusiness
+		} else if terminalAttemptStatus(attempt.Status) {
+			collaborationInstance.Status = orchestration.InstanceFailed
+		}
+		collaborationInstance.CompletionDecision = decision.ID
+		collaborationInstance.UpdatedAt = time.Now().UTC()
+		state.InstanceRuns[collaborationInstance.ID] = *collaborationInstance
 	}
 	state.Completions[decision.ID] = decision
 	state.Nodes[node.ID] = node

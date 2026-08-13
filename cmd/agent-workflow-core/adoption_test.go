@@ -344,6 +344,38 @@ func TestControllerSkillInstallerCreatesVerifiableReceipt(t *testing.T) {
 	}
 }
 
+func TestRoleFirstInstallerCreatesCanonicalControllerReceipt(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the role-first installer is a Windows adoption path")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is unavailable")
+	}
+	binary := buildAdoptionBinary(t)
+	consumer := t.TempDir()
+	repositoryRoot := filepath.Clean(filepath.Join(mustWorkingDirectory(t), "..", ".."))
+	installer := filepath.Join(repositoryRoot, "tools", "orchestration", "install_role_first_skill.ps1")
+	fixture := filepath.Join(repositoryRoot, "tests", "orchestration", "fixtures", "role-first")
+	baseArgs := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer, "-ToolkitRoot", repositoryRoot, "-ConsumerRoot", consumer, "-SkillSource", filepath.Join(fixture, "skill"), "-RolePackage", filepath.Join(fixture, "roles"), "-CorePath", binary, "-AllowDirty"}
+	if output, err := exec.Command(powershell, baseArgs...).CombinedOutput(); err != nil {
+		t.Fatalf("install role-first Skill: %v\n%s", err, output)
+	}
+	for _, expected := range []string{
+		filepath.Join(consumer, ".agents", "agent-workflow-toolkit.lock.json"),
+		filepath.Join(consumer, ".agents", "agent-workflow-role-first-skill.lock.json"),
+		filepath.Join(consumer, ".agents", "skills", "multi-agent-orchestration", "SKILL.md"),
+	} {
+		if _, err := os.Stat(expected); err != nil {
+			t.Fatalf("installed artifact %s: %v", expected, err)
+		}
+	}
+	checkArgs := append(append([]string(nil), baseArgs...), "-Check")
+	if output, err := exec.Command(powershell, checkArgs...).CombinedOutput(); err != nil {
+		t.Fatalf("check role-first Skill: %v\n%s", err, output)
+	}
+}
+
 func buildAdoptionBinary(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

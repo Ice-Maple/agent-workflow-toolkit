@@ -145,6 +145,7 @@ func TestStorageFiltersSecretsFromEventsAndReceipts(t *testing.T) {
 	}
 	event := orchestration.NewEvent(task.ID, "diagnostic", map[string]any{
 		"api_token":     "do-not-persist-this-token",
+		"capability":    "do-not-persist-this-capability",
 		"Authorization": "Bearer do-not-persist-this-header",
 		"safe":          "kept",
 		"nested":        map[string]any{"client_secret": "do-not-persist-this-secret"},

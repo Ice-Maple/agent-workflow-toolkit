@@ -1,6 +1,6 @@
 # Agent Workflow Toolkit
 
-面向 Agent 工作方式、能力扩展和工程实践的通用工具仓库。多 Agent 协同 MVP 的 Wave 0–4 已完成，四条受控只读执行路径已验收为 `experimental`；Wave 5 尚未启动。
+面向 Agent 工作方式、能力扩展和工程实践的通用工具仓库。多 Agent 协同 MVP 的 Wave 0–4 已完成，Codex App Native 宿主路径与三个 external CLI Adapter 的受控只读执行已验收为 `experimental`；role-first 可选协作入口正在按 U0–U3 收口，Wave 5 尚未启动。
 
 ## 仓库定位
 
@@ -60,6 +60,7 @@ SQLite、看板、daemon、tmux、完整 mailbox、OpenCode/Kilo 和复杂恢复
 - [功能入口清单](docs/guides/agent-capabilities.md)
 - [多 Agent 协同框架架构说明](docs/architecture/multi-agent-orchestration-architecture.md)
 - [多 Agent 协同框架项目接入与使用指南](docs/guides/multi-agent-orchestration-project-adoption.md)
+- [Role-first 可选协作入口设计](docs/brainstorms/2026-08-12-role-first-collaboration-entrypoint.md)
 
 ## 设计资料
 

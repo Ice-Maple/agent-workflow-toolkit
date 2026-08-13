@@ -400,6 +400,10 @@ func HashParameters(parameters map[string]any) string {
 		parameters = map[string]any{}
 	}
 	raw, _ := json.Marshal(parameters)
+	var canonical any
+	if err := json.Unmarshal(raw, &canonical); err == nil {
+		raw, _ = json.Marshal(canonical)
+	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }

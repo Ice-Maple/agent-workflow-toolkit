@@ -359,7 +359,9 @@ func (m *Manager) AcquireRunLocksForAttempt(attemptID string) (*LockSet, storage
 	}
 	for _, entry := range active.Runs {
 		if entry.AttemptID != attemptID {
-			continue
+			if _, ok := entry.Attempts[attemptID]; !ok {
+				continue
+			}
 		}
 		stateLock, lockErr := storage.AcquireRootLock(entry.StateDir, m.lockTimeout)
 		if lockErr != nil {
@@ -539,6 +541,9 @@ func (m *Manager) GetAttemptRunUnderLock(attemptID string) (storage.ActiveRunEnt
 		if entry.AttemptID == attemptID {
 			return entry, true, nil
 		}
+		if _, ok := entry.Attempts[attemptID]; ok {
+			return entry, true, nil
+		}
 	}
 	return storage.ActiveRunEntry{}, false, nil
 }
@@ -591,6 +596,13 @@ func (m *Manager) Disable() (DisableResult, error) {
 			entry.UpdatedAt = time.Now().UTC()
 			index.Runs[runID] = entry
 		}
+		for attemptID, attempt := range entry.Attempts {
+			if attempt.ShutdownStatus == "" || attempt.ShutdownStatus == "active" {
+				attempt.ShutdownStatus = "not_contacted"
+				entry.Attempts[attemptID] = attempt
+			}
+		}
+		index.Runs[runID] = entry
 		result.Runs = append(result.Runs, DisableRunStatus{RunID: runID, Status: entry.ShutdownStatus})
 	}
 	index.UpdatedAt = time.Now().UTC()

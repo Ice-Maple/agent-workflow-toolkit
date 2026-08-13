@@ -11,10 +11,10 @@
 
 - Agent 只需要读取项目并输出报告或评审 artifact；
 - 任务可以拆成一个或多个明确命名的 Workflow node；
-- 每个节点有明确角色、Adapter/model binding 和交付路径；
-- 节点完成后允许停下来等待人工批准；
+- 业务 Skill 只声明 `role/task/count/after`；Adapter/model binding 由本机 route 配置；
+- 普通节点完成后允许停下来等待人工批准；collaboration 内允许 validated completion 经 technical release 推进；
 - Provider/CLI 已在当前机器完成登录或凭据配置，但凭据不会写入仓库；
-- 团队接受当前没有 dashboard、daemon 和一键外部 Adapter executor。
+- 团队接受当前没有 dashboard、daemon 和生产 SLA。
 
 以下场景不要直接使用当前 `experimental` 路径：
 
@@ -29,11 +29,55 @@
 | 路径 | 推荐度 | 适用条件 | 当前接入方式 |
 | --- | --- | --- | --- |
 | Codex App Native | 首轮推荐 | 已在 Codex App 中工作，希望用原生 subagent 做只读 explorer/reviewer | 将 pinned Skill 安装到消费仓库 `.agents/skills`，通过 Gateway 签发/回填 Native action |
-| Cursor Agent | 条件可用 | 已安装并登录 Cursor Agent；任务不需要 MCP allowlist | 需要 toolkit-side host-action bridge；Adapter 本身已通过真实 smoke |
-| Claude Code | 条件可用 | 已安装并登录 Claude Code；MCP 配置可严格或配置隔离 | 需要 toolkit-side host-action bridge |
-| Codex CLI | 条件可用 | 已安装并登录 Codex CLI；provider route、sandbox 和 approval 可显式配置 | 需要 toolkit-side host-action bridge |
+| Cursor Agent | 条件可用 | 已安装并登录 Cursor Agent；任务不需要 MCP allowlist | `agent-workflow-bridge` 映射 core-signed HostAction |
+| Claude Code | 条件可用 | 已安装并登录 Claude Code；MCP 配置可严格或配置隔离 | `agent-workflow-bridge` 映射 core-signed HostAction |
+| Codex CLI | 条件可用 | 已安装并登录 Codex CLI；provider route、sandbox 和 approval 可显式配置 | `agent-workflow-bridge` 映射 core-signed HostAction |
 
-当前没有把三个外部 CLI Adapter 包装成统一命令的正式 executor。具体项目不能直接 import `internal/adapters/*`；如果没有准备实现 toolkit-side bridge，请先采用 Codex App Native 路径。
+三个 external CLI 共用公开 `agent-workflow-bridge`；Codex App Native 是另一条宿主路径，不经过该 CLI bridge。具体项目不能直接 import `internal/adapters/*`。
+
+### 2.1 普通接入：Role-first
+
+业务 Workflow/项目集中维护 `roles/roles.yaml` 和完整 Prompt；业务 Skill 的 `collaboration.yaml` 只写：
+
+```yaml
+schema_version: collaboration/v1
+role_dependencies: [sample-workflow/reviewer]
+steps:
+  - id: review
+    role: sample-workflow/reviewer
+    task: 按当前 Skill 的业务规则评审实际修改
+    count: 2
+```
+
+先构建三个公开命令，再安装 Controller Skill 或带 Role 依赖的业务 Skill：
+
+```powershell
+go build -o .\bin\agent-workflow-core.exe .\cmd\agent-workflow-core
+go build -o .\bin\agent-workflow-collaboration.exe .\cmd\agent-workflow-collaboration
+go build -o .\bin\agent-workflow-bridge.exe .\cmd\agent-workflow-bridge
+
+.\tools\orchestration\install_role_first_skill.ps1 `
+  -ToolkitRoot $ToolkitRoot -ConsumerRoot $ConsumerRoot `
+  -SkillSource $BusinessSkill -RolePackage $RolePackage `
+  -CorePath .\bin\agent-workflow-core.exe
+```
+
+该安装器会复制业务 Skill、其声明的 Role Package 和 framework Controller Skill，并写入来源/hash receipt；相同 package/version/hash 的共享 Role Package 会复用，内容冲突则 fail closed。三个 `.exe` 仍由 toolkit checkout 构建并固定路径，不会复制进业务仓库。
+
+安装后新建宿主任务。用户仍只调用业务 Skill；Router 读取 sidecar 并调用：
+
+```powershell
+agent-workflow-collaboration.exe `
+  --collaboration-file <skill>\collaboration.yaml `
+  --roles-manifest <roles>\roles.yaml `
+  --workspace <business-repository> `
+  --objective <current-objective> `
+  --state-dir <machine-local-new-run-state> `
+  --coordination-dir <machine-local-coordination> `
+  --policy-file <machine-local-routes-and-profiles>
+```
+
+返回 `direct` 时走宿主普通委派并如实报告不保证独立实例数；返回 `single` 时禁止 spawn/Gateway；只有 `framework` 才返回 Task、run、ready instances，并由 Controller 继续执行。安装不等于启用：machine gate 默认关闭，workspace 默认 `direct`。
 
 ## 3. 推荐部署拓扑
 
@@ -317,7 +361,7 @@ Gateway v1 公开 HostAction 只有：
 
 #### 外部 CLI 路径
 
-需要 toolkit-side bridge 把 HostAction 映射到 `internal/adapters/cursor`、`claude` 或 `codexcli`。当前没有可以从业务仓库直接调用的统一 executor command；不要直接 shell 拼接 Provider CLI 后再伪造 core result。
+使用 `agent-workflow-bridge --preflight` 校验 frozen Binding/profile，再用 `--execute --attempt-id ... --controller-instance-id ...` 拉取并执行唯一 pending HostAction。首次 `launch` 创建临时 owner；后续 `observe`/`cancel_host` 必须命中同一 PID/start marker/loopback endpoint/capability/profile hash，缺失或 stale 时不会重新 launch。bridge 直接把结构化结果提交 Gateway；不要直接 shell 拼接 Provider CLI 后再伪造 core result。
 
 无论哪条路径，提交结果时都必须使用 action 返回的 exact `action_id` 和 `lease`：
 
@@ -372,7 +416,7 @@ $completion = Invoke-TaskGateway @{
 - format、bytes 和 required sections 通过；
 - artifact SHA-256 已记录。
 
-成功后节点仍会进入 `awaiting_human_decision`，不会自动继续。
+普通节点成功后仍进入 `awaiting_human_decision`。带 collaboration linkage 的 instance 可由 Controller 请求 `recordCollaborationTechnicalRelease`；只有 validated completed、交付完整、依赖满足且无 contamination/outcome unknown/cancel 风险时才会放行下游，不创建 `HumanDecision`，也不代表业务审批通过。
 
 每个 Attempt 的 completion checkpoint 只记录一次。无论第一次结果是 completed 还是 `delivery_missing`，使用新 request ID 再次调用 `requestCompletion` 都会返回 `completion_already_recorded`；相同 request ID 的网络重放仍由 request journal 返回原 outcome。不得在 checkpoint 后本地补 artifact 并重算同一 Attempt。
 

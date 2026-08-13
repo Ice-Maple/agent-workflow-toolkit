@@ -112,6 +112,12 @@ func (c CoreClient) RequestCancel(ctx context.Context, input gateway.CancelInput
 	return output, err
 }
 
+func (c CoreClient) RegisterCollaborationOwner(ctx context.Context, input gateway.RegisterCollaborationOwnerInput) (gateway.RegisterCollaborationOwnerResult, error) {
+	var output gateway.RegisterCollaborationOwnerResult
+	err := c.Call(ctx, "registerCollaborationOwner", input, &output)
+	return output, err
+}
+
 func (c CoreClient) command(ctx context.Context) (*exec.Cmd, error) {
 	executable := strings.TrimSpace(c.Executable)
 	if executable == "" {

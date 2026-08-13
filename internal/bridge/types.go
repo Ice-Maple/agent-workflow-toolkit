@@ -27,14 +27,17 @@ type Profile struct {
 // Action and Attempt from the core bridge client instead of reconstructing
 // either value from business input.
 type Request struct {
-	SchemaVersion        string                   `json:"schema_version"`
-	AttemptID            string                   `json:"attempt_id"`
-	ControllerInstanceID string                   `json:"controller_instance_id"`
-	Action               orchestration.HostAction `json:"action"`
-	Attempt              orchestration.Attempt    `json:"attempt"`
-	Profile              Profile                  `json:"profile"`
-	ExpectedProfileHash  string                   `json:"expected_profile_hash,omitempty"`
-	RolePromptHash       string                   `json:"role_prompt_hash,omitempty"`
+	SchemaVersion           string                   `json:"schema_version"`
+	AttemptID               string                   `json:"attempt_id"`
+	ControllerInstanceID    string                   `json:"controller_instance_id"`
+	CollaborationRunID      string                   `json:"collaboration_run_id,omitempty"`
+	CollaborationInstanceID string                   `json:"collaboration_instance_id,omitempty"`
+	GateEpoch               uint64                   `json:"gate_epoch,omitempty"`
+	Action                  orchestration.HostAction `json:"action"`
+	Attempt                 orchestration.Attempt    `json:"attempt"`
+	Profile                 Profile                  `json:"profile"`
+	ExpectedProfileHash     string                   `json:"expected_profile_hash,omitempty"`
+	RolePromptHash          string                   `json:"role_prompt_hash,omitempty"`
 }
 
 type OwnerReceipt struct {

@@ -64,20 +64,35 @@ type CoordinationState struct {
 }
 
 type ActiveRunEntry struct {
-	RunID              string    `json:"run_id"`
-	Workspace          string    `json:"workspace"`
-	StateDir           string    `json:"state_dir"`
-	GateEpoch          uint64    `json:"gate_epoch"`
-	AttemptID          string    `json:"attempt_id,omitempty"`
-	InstanceID         string    `json:"instance_id,omitempty"`
-	OwnerPID           int       `json:"owner_pid,omitempty"`
-	OwnerStartMarker   string    `json:"owner_start_marker,omitempty"`
-	OwnerEndpoint      string    `json:"owner_endpoint,omitempty"`
-	OwnerCapability    string    `json:"owner_capability,omitempty"`
-	LastActionID       string    `json:"last_action_id,omitempty"`
-	LastActionSequence int       `json:"last_action_sequence,omitempty"`
-	UpdatedAt          time.Time `json:"updated_at"`
-	ShutdownStatus     string    `json:"shutdown_status,omitempty"`
+	RunID               string                        `json:"run_id"`
+	Workspace           string                        `json:"workspace"`
+	StateDir            string                        `json:"state_dir"`
+	GateEpoch           uint64                        `json:"gate_epoch"`
+	AttemptID           string                        `json:"attempt_id,omitempty"`
+	InstanceID          string                        `json:"instance_id,omitempty"`
+	OwnerPID            int                           `json:"owner_pid,omitempty"`
+	OwnerStartMarker    string                        `json:"owner_start_marker,omitempty"`
+	OwnerEndpoint       string                        `json:"owner_endpoint,omitempty"`
+	OwnerCapabilityHash string                        `json:"owner_capability_hash,omitempty"`
+	OwnerStateDir       string                        `json:"owner_state_dir,omitempty"`
+	Attempts            map[string]ActiveAttemptEntry `json:"attempts,omitempty"`
+	LastActionID        string                        `json:"last_action_id,omitempty"`
+	LastActionSequence  int                           `json:"last_action_sequence,omitempty"`
+	UpdatedAt           time.Time                     `json:"updated_at"`
+	ShutdownStatus      string                        `json:"shutdown_status,omitempty"`
+}
+
+type ActiveAttemptEntry struct {
+	AttemptID           string `json:"attempt_id"`
+	InstanceID          string `json:"instance_id"`
+	OwnerPID            int    `json:"owner_pid,omitempty"`
+	OwnerStartMarker    string `json:"owner_start_marker,omitempty"`
+	OwnerEndpoint       string `json:"owner_endpoint,omitempty"`
+	OwnerCapabilityHash string `json:"owner_capability_hash,omitempty"`
+	OwnerStateDir       string `json:"owner_state_dir,omitempty"`
+	LastActionID        string `json:"last_action_id,omitempty"`
+	LastActionSequence  int    `json:"last_action_sequence,omitempty"`
+	ShutdownStatus      string `json:"shutdown_status,omitempty"`
 }
 
 type ActiveRunIndex struct {
@@ -918,7 +933,7 @@ func sanitizeValue(value any, key string) any {
 
 func isSensitiveKey(key string) bool {
 	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(key), "-", "_"), " ", "_"))
-	if normalized == "authorization" || normalized == "auth_header" || normalized == "authentication_header" || normalized == "user_authorization_evidence" || normalized == "cookie" {
+	if normalized == "authorization" || normalized == "auth_header" || normalized == "authentication_header" || normalized == "user_authorization_evidence" || normalized == "cookie" || normalized == "capability" || normalized == "owner_capability" {
 		return true
 	}
 	for _, marker := range []string{"secret", "token", "password", "passwd", "api_key", "apikey", "credential", "private_key", "access_key"} {

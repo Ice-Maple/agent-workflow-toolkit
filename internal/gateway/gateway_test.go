@@ -1,8 +1,10 @@
 package gateway
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,11 +12,304 @@ import (
 	"time"
 
 	"agent-workflow-toolkit/internal/adapters/fake"
+	"agent-workflow-toolkit/internal/coordination"
 	"agent-workflow-toolkit/internal/orchestration"
 	"agent-workflow-toolkit/internal/policy"
 	protocol "agent-workflow-toolkit/internal/protocol/v1"
 	"agent-workflow-toolkit/internal/storage"
 )
+
+func TestRoleFirstCollaborationInstanceTechnicalReleaseAdvancesFrozenDAG(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	promptPath := filepath.Join(root, "reviewer.md")
+	prompt := "# Reviewer\n\nReview the actual files.\n\nTask: {{ task }}\n\nOutput: {{ output_requirements }}\n"
+	if err := os.WriteFile(promptPath, []byte(prompt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(prompt))
+	promptHash := fmt.Sprintf("%x", sum[:])
+	role := "workflow/independent-reviewer"
+	binding := orchestration.Binding{Role: role, Adapter: "fake", Model: "fixture-model", Reasoning: "none", Permission: "read-only", Workspace: workspace}
+	config := policy.DefaultConfig()
+	config.RegisteredBindings = []orchestration.Binding{binding}
+	config.RoleRoutes = map[string]orchestration.RoleRoute{role: {Role: role, Primary: binding}}
+	config.RoleDefinitions = map[string]orchestration.RoleDefinition{role: {ID: role, Package: "workflow", Version: "1.0.0", PromptPath: promptPath, PromptHash: promptHash}}
+	if err := config.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.New(filepath.Join(root, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := coordination.New(filepath.Join(root, "machine"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.SetFrameworkEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.Status(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core, err := New(store, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := core.CreateTask(CreateTaskInput{Objective: "role-first DAG", Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	locks, err := manager.AcquireRunLocks(store.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locks.Release()
+	core, err = NewWithCoordinationLocked(store, config, manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := orchestration.CollaborationPlan{SchemaVersion: "collaboration/v1", RolePromptHashes: map[string]string{role: promptHash}, Steps: []orchestration.CollaborationStepSpec{
+		{ID: "draft", Role: role, Task: "Produce the draft review"},
+		{ID: "follow-up", Role: role, Task: "Review the released draft", After: []string{"draft"}},
+	}}
+	runResult, err := core.CreateCollaborationRun(CreateCollaborationRunInput{TaskID: task.Task.ID, RevisionID: task.Revision.ID, Workspace: workspace, EffectiveMode: orchestration.CollaborationFramework, GateEpoch: status.GateEpoch, Plan: plan, StateDir: store.Root()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runResult.Instances) != 2 || runResult.Instances[0].Status != orchestration.InstanceReady || runResult.Instances[1].Status != orchestration.InstanceWaiting {
+		t.Fatalf("created collaboration instances = %#v", runResult.Instances)
+	}
+	first, err := core.PrepareCollaborationInstance(PrepareCollaborationInstanceInput{RunID: runResult.Run.ID, InstanceID: runResult.Instances[0].ID, GateEpoch: status.GateEpoch, Kind: "draft-review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Preflight.Status != "passed" || first.Node.Status != orchestration.NodePrepared || first.Instance.NodeID != first.Node.ID {
+		t.Fatalf("prepared role-first instance = %#v", first)
+	}
+	launch, err := core.PrepareAttempt(PrepareAttemptInput{NodeID: first.Node.ID, ControllerInstanceID: "role-first-controller", CollaborationRunID: runResult.Run.ID, InstanceRunID: first.Instance.ID, GateEpoch: status.GateEpoch, RolePromptHash: promptHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatchPrompt := actionStringForTest(launch.LaunchAction.Parameters, "dispatch_prompt")
+	for _, expected := range []string{"run_id=" + runResult.Run.ID, "instance_id=" + first.Instance.ID, "Review the actual files.", "Produce the draft review", "task_canary=" + launch.Attempt.TaskCanary} {
+		if !strings.Contains(dispatchPrompt, expected) {
+			t.Fatalf("dispatch prompt missing %q: %s", expected, dispatchPrompt)
+		}
+	}
+	started := true
+	identity := map[string]string{"provider": "fake", "session": "role-first-session", "workspace": workspace}
+	if _, err := core.SubmitHostActionResult(SubmitHostActionResultInput{AttemptID: launch.Attempt.ID, ActionID: launch.LaunchAction.ID, Lease: launch.LaunchAction.Lease, Result: orchestration.HostActionResult{Status: "completed", Terminal: true, ProviderHandle: "role-first-handle", ProviderSessionID: "role-first-session", ExecutionStarted: &started, SideEffectState: "none", Identity: identity, TaskCanary: launch.Attempt.TaskCanary}}); err != nil {
+		t.Fatal(err)
+	}
+	completion, err := core.RequestCompletion(CompletionInput{AttemptID: launch.Attempt.ID, CollaborationRunID: runResult.Run.ID, InstanceRunID: first.Instance.ID, GateEpoch: status.GateEpoch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.Decision.Status != orchestration.AttemptCompleted || completion.Node.Status != orchestration.NodeAwaitingHumanDecision {
+		t.Fatalf("collaboration completion = %#v", completion)
+	}
+	release, err := core.RecordCollaborationTechnicalRelease(TechnicalReleaseInput{RunID: runResult.Run.ID, InstanceID: first.Instance.ID, Reason: "validated framework completion"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release.Release.AuthorityID == "" || release.Instance.Status != orchestration.InstanceTechnicallyDone || len(release.NextReady) != 1 || release.NextReady[0].StepID != "follow-up" {
+		t.Fatalf("technical release = %#v", release)
+	}
+	state, err := store.Load(task.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.HumanDecisions) != 0 || state.Nodes[first.Node.ID].Status != orchestration.NodeTechnicallyDelivered {
+		t.Fatalf("technical release changed human/business state: decisions=%#v node=%#v", state.HumanDecisions, state.Nodes[first.Node.ID])
+	}
+	if state.InstanceRuns[runResult.Instances[1].ID].Status != orchestration.InstanceReady {
+		t.Fatalf("downstream instance was not made ready: %#v", state.InstanceRuns[runResult.Instances[1].ID])
+	}
+	second, err := core.PrepareCollaborationInstance(PrepareCollaborationInstanceInput{RunID: runResult.Run.ID, InstanceID: runResult.Instances[1].ID, GateEpoch: status.GateEpoch, Kind: "follow-up-review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondLaunch, err := core.PrepareAttempt(PrepareAttemptInput{NodeID: second.Node.ID, ControllerInstanceID: "role-first-controller", CollaborationRunID: runResult.Run.ID, InstanceRunID: second.Instance.ID, GateEpoch: status.GateEpoch, RolePromptHash: promptHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPrompt := actionStringForTest(secondLaunch.LaunchAction.Parameters, "dispatch_prompt")
+	for _, expected := range []string{"Upstream outputs:", first.Instance.ID, "\"step_id\":\"draft\""} {
+		if !strings.Contains(secondPrompt, expected) {
+			t.Fatalf("downstream dispatch prompt missing %q: %s", expected, secondPrompt)
+		}
+	}
+	if _, err := core.RecordHumanDecision(HumanDecisionInput{NodeID: first.Node.ID, Decision: "approve", AuthorityRef: "user-input:should-not-be-needed"}); err == nil {
+		t.Fatal("technical release unexpectedly left a human checkpoint to approve")
+	} else if gatewayErr, ok := err.(*Error); !ok || gatewayErr.Code != "checkpoint_required" {
+		t.Fatalf("technical release human decision error = %v", err)
+	}
+}
+
+func TestCollaborationTechnicalReleaseRejectsUnsafeCompletionMatrix(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.New(filepath.Join(root, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := coordination.New(filepath.Join(root, "coordination"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, err := manager.SetFrameworkEnabled(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core, err := New(store, policy.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := core.CreateTask(CreateTaskInput{Objective: "release rejection matrix", Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		name           string
+		attemptStatus  orchestration.AttemptStatus
+		decisionStatus orchestration.AttemptStatus
+		reason         string
+	}{
+		{"failed", orchestration.AttemptFailed, orchestration.AttemptIncomplete, "provider_failed"},
+		{"delivery_missing", orchestration.AttemptCompleted, orchestration.AttemptIncomplete, "delivery_missing"},
+		{"contaminated", orchestration.AttemptContaminated, orchestration.AttemptIncomplete, "identity_mismatch"},
+		{"outcome_unknown", orchestration.AttemptIncomplete, orchestration.AttemptIncomplete, "action_outcome_unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state, err := store.Load(task.Task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runID, instanceID, stepRunID := orchestration.NewID("run"), orchestration.NewID("instance"), orchestration.NewID("step-run")
+			nodeID, attemptID, decisionID := orchestration.NewID("node"), orchestration.NewID("attempt"), orchestration.NewID("completion")
+			plan := orchestration.CollaborationPlan{SchemaVersion: "collaboration/v1", Steps: []orchestration.CollaborationStepSpec{{ID: "review", Role: "reviewer", Task: "review"}}}
+			state.CollaborationRuns[runID] = orchestration.CollaborationRun{ID: runID, TaskID: task.Task.ID, RevisionID: task.Revision.ID, PlanHash: hashJSON(plan), Plan: plan, Workspace: workspace, EffectiveMode: orchestration.CollaborationFramework, GateEpoch: gate.GateEpoch, SchedulerAuthorityID: "scheduler-fixture", Status: orchestration.CollaborationRunActive, CreatedAt: now, UpdatedAt: now}
+			state.StepRuns[stepRunID] = orchestration.StepRun{ID: stepRunID, RunID: runID, StepID: "review", InstanceIDs: []string{instanceID}, Status: orchestration.StepRunRunning, CreatedAt: now, UpdatedAt: now}
+			state.Nodes[nodeID] = orchestration.WorkflowNode{ID: nodeID, TaskID: task.Task.ID, RevisionID: task.Revision.ID, Kind: "review", Role: "reviewer", Status: orchestration.NodeAwaitingHumanDecision, CheckpointAttemptID: attemptID, CreatedAt: now, UpdatedAt: now}
+			state.Attempts[attemptID] = orchestration.Attempt{ID: attemptID, TaskID: task.Task.ID, NodeID: nodeID, RevisionID: task.Revision.ID, Status: test.attemptStatus, CreatedAt: now, UpdatedAt: now}
+			state.Completions[decisionID] = orchestration.CompletionDecision{ID: decisionID, AttemptID: attemptID, Status: test.decisionStatus, Reason: test.reason, CreatedAt: now}
+			state.InstanceRuns[instanceID] = orchestration.InstanceRun{ID: instanceID, RunID: runID, StepRunID: stepRunID, StepID: "review", Role: "reviewer", NodeID: nodeID, AttemptID: attemptID, Status: orchestration.InstanceAwaitingBusiness, CompletionDecision: decisionID, CreatedAt: now, UpdatedAt: now}
+			if err := store.Save(state); err != nil {
+				t.Fatal(err)
+			}
+			locks, err := manager.AcquireRunLocks(store.Root())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.RegisterRunUnderLock(storage.ActiveRunEntry{RunID: runID, Workspace: workspace, StateDir: store.Root(), GateEpoch: gate.GateEpoch}); err != nil {
+				_ = locks.Release()
+				t.Fatal(err)
+			}
+			lockedCore, err := NewWithCoordinationLocked(store, policy.DefaultConfig(), manager)
+			if err != nil {
+				_ = locks.Release()
+				t.Fatal(err)
+			}
+			_, releaseErr := lockedCore.RecordCollaborationTechnicalRelease(TechnicalReleaseInput{RunID: runID, InstanceID: instanceID, Reason: "must reject"})
+			_ = locks.Release()
+			if releaseErr == nil {
+				t.Fatalf("technical release accepted %s", test.name)
+			} else if gatewayErr, ok := releaseErr.(*Error); !ok || gatewayErr.Code != "technical_release_ineligible" {
+				t.Fatalf("technical release %s error = %v", test.name, releaseErr)
+			}
+		})
+	}
+}
+
+func TestDisabledCollaborationPollDoesNotReturnPendingObserve(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.New(filepath.Join(root, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := coordination.New(filepath.Join(root, "machine"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.SetFrameworkEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.Status(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locks, err := manager.AcquireRunLocks(store.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := policy.DefaultConfig()
+	core, err := NewWithCoordinationLocked(store, config, manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := core.CreateTask(CreateTaskInput{Objective: "disable poll", Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, attemptID := "run-disable-test", "attempt-disable-test"
+	state, err := store.Load(task.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.CollaborationRuns[runID] = orchestration.CollaborationRun{ID: runID, TaskID: task.Task.ID, RevisionID: task.Revision.ID, Workspace: workspace, GateEpoch: status.GateEpoch, Status: orchestration.CollaborationRunActive}
+	state.Attempts[attemptID] = orchestration.Attempt{ID: attemptID, TaskID: task.Task.ID, RevisionID: task.Revision.ID, NodeID: "node-disable-test", Status: orchestration.AttemptRunning, Binding: orchestration.Binding{Role: "reviewer", Adapter: "fake", Model: "fixture", Reasoning: "none", Permission: "read-only", Workspace: workspace}, TaskCanary: "disable-canary"}
+	state.Nodes["node-disable-test"] = orchestration.WorkflowNode{ID: "node-disable-test", TaskID: task.Task.ID, RevisionID: task.Revision.ID, Kind: "review", Role: "reviewer", Status: orchestration.NodeRunning}
+	state.InstanceRuns["instance-disable-test"] = orchestration.InstanceRun{ID: "instance-disable-test", RunID: runID, NodeID: "node-disable-test", AttemptID: attemptID, Status: orchestration.InstanceRunning}
+	observe := orchestration.HostAction{ID: "observe-disable-test", AttemptID: attemptID, Kind: orchestration.ActionObserve, Sequence: 2, Lease: "observe-lease", Status: orchestration.ActionPending, Parameters: map[string]any{"task_canary": "disable-canary"}, IssuedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Minute).UTC()}
+	observe.ParametersHash = orchestration.HashParameters(observe.Parameters)
+	state.Actions[observe.ID] = observe
+	if err := store.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RegisterRunUnderLock(storage.ActiveRunEntry{RunID: runID, Workspace: workspace, StateDir: store.Root(), GateEpoch: status.GateEpoch, AttemptID: attemptID, InstanceID: "instance-disable-test", ShutdownStatus: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := locks.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Disable(); err != nil {
+		t.Fatal(err)
+	}
+	locks, _, found, err := manager.AcquireRunLocksForAttempt(attemptID)
+	if err != nil || !found {
+		t.Fatalf("AcquireRunLocksForAttempt() = (%v, %v)", found, err)
+	}
+	defer locks.Release()
+	core, err = NewWithCoordinationLocked(store, config, manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := core.PollHostActions(PollHostActionsInput{AttemptID: attemptID, ControllerInstanceID: "controller-disable-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Actions) != 0 {
+		t.Fatalf("disabled poll returned execution actions: %#v", batch.Actions)
+	}
+}
+
+func actionStringForTest(parameters map[string]any, key string) string {
+	value, _ := parameters[key].(string)
+	return value
+}
 
 func TestFakeReadOnlyWorkflowReachesHumanCheckpoint(t *testing.T) {
 	root := t.TempDir()

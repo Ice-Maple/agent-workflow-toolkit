@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-workflow-toolkit/internal/gateway"
 	"agent-workflow-toolkit/internal/orchestration"
 )
 
@@ -47,6 +48,14 @@ func startOwnerProcess(ctx context.Context, executable string, bootstrap ownerBo
 		return OwnerReceipt{}, err
 	}
 	command := exec.Command(executable, "--owner", "--owner-bootstrap", bootstrapPath)
+	ownerLogPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".owner.log"
+	ownerLog, logErr := os.OpenFile(ownerLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if logErr != nil {
+		return OwnerReceipt{}, fmt.Errorf("create bridge owner log: %w", logErr)
+	}
+	defer ownerLog.Close()
+	command.Stdout = ownerLog
+	command.Stderr = ownerLog
 	if err := configureDetachedProcess(command); err != nil {
 		return OwnerReceipt{}, err
 	}
@@ -73,6 +82,11 @@ func startOwnerProcess(ctx context.Context, executable string, bootstrap ownerBo
 			if !found {
 				_ = command.Process.Kill()
 				_ = os.Remove(bootstrapPath)
+				_ = ownerLog.Sync()
+				diagnostic, _ := os.ReadFile(ownerLogPath)
+				if message := strings.TrimSpace(string(diagnostic)); message != "" {
+					return OwnerReceipt{}, fmt.Errorf("bridge owner did not publish a receipt: %s", message)
+				}
 				return OwnerReceipt{}, errors.New("bridge owner did not publish a receipt")
 			}
 			_ = os.Remove(bootstrapPath)
@@ -119,7 +133,7 @@ func runOwnerProcess(bootstrapPath string) error {
 		_ = listener.Close()
 		return err
 	}
-	marker, err := newCapability()
+	marker, err := currentProcessStartMarker()
 	if err != nil {
 		_ = listener.Close()
 		return err
@@ -142,6 +156,20 @@ func runOwnerProcess(bootstrapPath string) error {
 	if err := store.Save(receipt); err != nil {
 		_ = listener.Close()
 		return err
+	}
+	if bootstrap.Request.CollaborationRunID != "" {
+		if _, err := bootstrap.Core.RegisterCollaborationOwner(context.Background(), gateway.RegisterCollaborationOwnerInput{
+			RunID: bootstrap.Request.CollaborationRunID, InstanceID: bootstrap.Request.CollaborationInstanceID,
+			AttemptID: bootstrap.Request.AttemptID, GateEpoch: bootstrap.Request.GateEpoch,
+			OwnerPID: receipt.OwnerPID, OwnerStartMarker: receipt.OwnerStartMarker, OwnerEndpoint: receipt.Endpoint,
+			OwnerCapabilityHash: hashToken(receipt.Capability), OwnerStateDir: bootstrap.BridgeStateDir, LastActionID: receipt.ActionID,
+		}); err != nil {
+			serverReceipt := receipt
+			serverReceipt.State = "outcome_unknown"
+			_ = store.Save(serverReceipt)
+			_ = listener.Close()
+			return fmt.Errorf("register collaboration owner: %w", err)
+		}
 	}
 	server := &ownerServer{runtime: runtime, core: bootstrap.Core, store: store, receipt: receipt, listener: listener, marker: marker, done: make(chan struct{})}
 	server.receipt = receipt

@@ -23,6 +23,8 @@ var operations = map[string]struct{}{
 	"prepareAttempt":                      {},
 	"resolveRole":                         {},
 	"createCollaborationRun":              {},
+	"prepareCollaborationInstance":        {},
+	"registerCollaborationOwner":          {},
 	"recordCollaborationTechnicalRelease": {},
 	"prepareRetryAttempt":                 {},
 	"prepareFallbackAttempt":              {},

@@ -3,6 +3,7 @@ package coordination
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +73,48 @@ func TestGateEpochAndDisableKeepConvergenceLookup(t *testing.T) {
 	}
 	if err := attemptLocks.Release(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestActiveRunIndexTracksMultipleAttemptsWithoutCapabilityPlaintext(t *testing.T) {
+	root := t.TempDir()
+	manager, err := New(filepath.Join(root, "machine"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := manager.SetFrameworkEnabled(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := filepath.Join(root, "state")
+	locks, err := manager.AcquireRunLocks(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := storage.ActiveRunEntry{RunID: "run-many", Workspace: filepath.Join(root, "workspace"), StateDir: stateRoot, GateEpoch: enabled.GateEpoch, Attempts: map[string]storage.ActiveAttemptEntry{
+		"attempt-1": {AttemptID: "attempt-1", InstanceID: "instance-1", OwnerCapabilityHash: "hash-1"},
+		"attempt-2": {AttemptID: "attempt-2", InstanceID: "instance-2", OwnerCapabilityHash: "hash-2"},
+	}}
+	if err := manager.RegisterRunUnderLock(entry); err != nil {
+		_ = locks.Release()
+		t.Fatal(err)
+	}
+	if err := locks.Release(); err != nil {
+		t.Fatal(err)
+	}
+	for _, attemptID := range []string{"attempt-1", "attempt-2"} {
+		attemptLocks, _, found, err := manager.AcquireRunLocksForAttempt(attemptID)
+		if err != nil || !found {
+			t.Fatalf("lookup %s = found=%v err=%v", attemptID, found, err)
+		}
+		_ = attemptLocks.Release()
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "machine", "active-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "owner_capability\"") {
+		t.Fatalf("active-run index contains plaintext capability field: %s", raw)
 	}
 }
 

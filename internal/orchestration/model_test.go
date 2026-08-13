@@ -1,10 +1,27 @@
 package orchestration
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestHashParametersIsStableAcrossJSONTransport(t *testing.T) {
+	parameters := map[string]any{"binding": Binding{Role: "reviewer", Adapter: "cursor", Model: "fixture", Permission: "read-only"}, "expected_output": ExpectedOutput{Required: false}}
+	want := HashParameters(parameters)
+	raw, err := json.Marshal(parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transported map[string]any
+	if err := json.Unmarshal(raw, &transported); err != nil {
+		t.Fatal(err)
+	}
+	if got := HashParameters(transported); got != want {
+		t.Fatalf("transported hash = %s, want %s", got, want)
+	}
+}
 
 func TestValidateAttemptTransitionCoversTerminalAndCancelBoundaries(t *testing.T) {
 	allowed := [][2]AttemptStatus{

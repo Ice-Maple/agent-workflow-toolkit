@@ -1,11 +1,26 @@
 ---
 name: multi-agent-orchestration
-description: Use when coordinating a generic multi-agent Workflow through the shared Go TaskGateway and Codex App Native subagents. Creates explicit Task/Node/Attempt state, executes only core-signed Native host actions, preserves human checkpoints, and records durable completion evidence. Do not use for domain-specific prompts or business acceptance rules.
+description: Use automatically when a business Skill provides collaboration.yaml, or explicitly for the advanced Gateway loop. Routes role-first plans across framework/direct/single, executes core-signed Codex App Native actions or the public external CLI bridge, and keeps business approval separate from technical release.
 ---
 
 # Multi-Agent Orchestration Controller
 
-This Skill is the Codex App Controller entrypoint for the Wave 2 Native slice. It coordinates generic Workflow semantics through the Go core; it does not become a second state machine and it does not contain provider-specific CLI commands.
+This Skill is the framework Router/Controller. A user normally calls the business Skill, not this Skill. The business Skill owns its full workflow and optional `collaboration.yaml`; Workflow/project Role Packages own complete Role Prompt templates; this Skill owns only generic routing and host execution.
+
+## Role-first entry
+
+When the active business Skill has `collaboration.yaml`:
+
+1. Validate the installed framework receipt and the business Skill/Role receipt. Never search for a different Role definition after admission.
+2. Call `agent-workflow-collaboration` with the sidecar, `roles.yaml`, canonical workspace and machine-local coordination root. The sidecar may contain only `role_dependencies` and steps with `id`, `role`, `task`, `count`, and `after`.
+3. Honor the returned `effective_mode`:
+   - `framework`: use the returned frozen run/instances and continue through TaskGateway;
+   - `direct`: return control to the host's ordinary delegation path and report that independent instance count is not guaranteed;
+   - `single`: do not spawn or call Gateway; the current Agent executes sequentially.
+4. In framework mode, call `prepareCollaborationInstance` only for returned ready instances, run the selected host preflight, then call `prepareAttempt` with the exact `run_id`, `instance_id`, binding, and gate epoch. Never let the business Skill supply Adapter/model/Gateway fields.
+5. For Codex App Native, execute the core-signed action with the App's native capability. For `claude`, `cursor`, or `codexcli`, call `agent-workflow-bridge --execute`; never compose Provider shell commands in the business repository.
+6. After validated completion, call `recordCollaborationTechnicalRelease`. This may advance only the frozen DAG. It must not create `HumanDecision`, `user-input:*`, `goal:*`, or business approval.
+7. If technical release is rejected, or admission, contamination, outcome-unknown, cancellation, retry/fallback, or `delivery_missing` occurs, stop at the real checkpoint and surface it to the user.
 
 ## Non-negotiable boundaries
 
@@ -14,11 +29,11 @@ This Skill is the Codex App Controller entrypoint for the Wave 2 Native slice. I
 3. A Native subagent may run only after the core has returned a pending host action. Never launch a subagent merely because a node was proposed or because an Agent text says it is ready.
 4. Codex App Native uses the App's native subagent capability. Do not shell-launch `codex`, `codex.exe`, or another CLI to simulate the Native path.
 5. Do not use `--force`, `--yolo`, hidden approval, automatic Goal authority, or an unregistered binding to bypass a checkpoint.
-6. If the host cannot provide the required Native capability, report `unsupported` or `degraded` through the core path and stop that execution path. Do not silently switch to an external CLI.
+6. If the selected host capability is unavailable, report `unsupported` or `degraded` through the core path. Any route fallback must be selected by machine-local policy; do not silently switch Adapter after Attempt admission.
 7. In a consumer repository, require a valid `.agents/agent-workflow-toolkit.lock.json` produced by `tools/orchestration/install_controller_skill.ps1`; run its `-Check` mode before the first Gateway request. Do not silently use another global or copied Skill.
 8. Treat the node role as admission data. The proposed node role and binding role must be the same non-empty configurable string.
 
-## Controller loop
+## Advanced Gateway loop
 
 For each user task:
 
@@ -28,8 +43,8 @@ For each user task:
 4. Execute only the Gateway v1 public actions `launch`, `observe`, or `cancel_host`. Submit the structured result once with the exact lease. `send` and `cleanup` are reserved Adapter lifecycle primitives and are not valid Gateway HostActions.
 5. Preserve the Native task handle, provider/session identity, workspace, and task canary. A mismatch is contamination or incomplete evidence according to the core response; stop and surface the human checkpoint.
 6. Request completion through the core. Required artifacts must exist at the declared canonical path and pass core validation. Empty text, a successful turn event without final text, or tool-only output is not completion evidence.
-7. When the core returns `awaiting_human_decision`, stop. Ask the user for `approve`, `request_revision`, `retry_node`, `abort`, or the specific contamination release decision. Do not infer approval from a successful provider exit.
-8. Only after the core records the human decision may the Controller propose or prepare the next node. Keep all historical Attempts and decisions visible through core responses.
+7. For a legacy node, when the core returns `awaiting_human_decision`, stop and ask for the applicable real decision. For a collaboration instance, request technical release only under the role-first conditions above.
+8. Only a real HumanDecision may advance a legacy node; only a valid CollaborationTechnicalRelease may advance a collaboration DAG. Keep all historical Attempts, releases, and decisions visible through core responses.
 9. If completion returns `delivery_missing`, do not wait for a `send` action or recompute completion after writing a local artifact: Gateway v1 will not issue one and the checkpoint is immutable. Request `request_revision` or `abort`; a new revision/node is the supported recovery path.
 10. Release provider process/task resources in the host or Adapter runner's `finally` path. Cleanup is not submitted as a Gateway HostActionResult.
 
@@ -37,7 +52,7 @@ For each user task:
 
 The action/result mapping and idempotency rules are documented in [references/native-action-contract.md](references/native-action-contract.md). The reference is a contract, not a substitute for the core response. If the contract and a live core response disagree, stop with a diagnostic rather than guessing.
 
-## First supported Workflow
+## Minimal Native reference
 
 Use a read-only explorer/reviewer node that produces a Markdown artifact in the task workspace. Do not write to a business repository, enable Goal mode, or expand permissions in the first Native smoke. The expected sequence is:
 
@@ -47,4 +62,4 @@ createTask → proposeNode → runPreflight → prepareAttempt
   → awaiting_human_decision → user approve
 ```
 
-The Controller must leave the task at the human checkpoint when completion is valid. It must also preserve a failed `delivery_missing` CompletionDecision before asking the user to revise or abort; Gateway v1 does not provide in-place delivery follow-up.
+This legacy sequence must leave the task at the human checkpoint. A role-first collaboration instead uses the dedicated technical-release operation after validated completion; `delivery_missing` still requires a real revision/abort decision and cannot be technically released.

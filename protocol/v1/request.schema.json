@@ -17,6 +17,8 @@
         "prepareAttempt",
         "resolveRole",
         "createCollaborationRun",
+        "prepareCollaborationInstance",
+        "registerCollaborationOwner",
         "recordCollaborationTechnicalRelease",
         "prepareRetryAttempt",
         "prepareFallbackAttempt",

@@ -1,0 +1,8 @@
+schema_version: collaboration/v1
+role_dependencies:
+  - sample-workflow/reviewer
+steps:
+  - id: native-review
+    role: sample-workflow/reviewer
+    task: Return exactly NATIVE_ROLE_FIRST_OK after reading only this prompt
+    count: 1

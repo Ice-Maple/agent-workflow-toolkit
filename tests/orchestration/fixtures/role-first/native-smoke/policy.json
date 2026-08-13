@@ -1,0 +1,30 @@
+{
+  "registered_bindings": [
+    {
+      "role": "sample-workflow/reviewer",
+      "adapter": "codex-native",
+      "model": "gpt-5.6-sol",
+      "reasoning": "high",
+      "permission": "read-only",
+      "workspace": ""
+    }
+  ],
+  "role_routes": {
+    "sample-workflow/reviewer": {
+      "role": "sample-workflow/reviewer",
+      "primary": {
+        "role": "sample-workflow/reviewer",
+        "adapter": "codex-native",
+        "model": "gpt-5.6-sol",
+        "reasoning": "high",
+        "permission": "read-only",
+        "workspace": ""
+      }
+    }
+  },
+  "retry_mode": "disabled",
+  "max_auto_retries": 0,
+  "fallback_mode": "disabled",
+  "mcp_isolation": "strict",
+  "goal_enabled": false
+}

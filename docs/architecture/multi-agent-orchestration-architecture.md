@@ -2,7 +2,7 @@
 
 - 文档用途：技术讨论、方案评审和阶段汇报
 - 当前成熟度：`experimental`
-- 当前能力边界：Codex App Native、Cursor Agent、Claude Code、Codex CLI 四条受控只读执行路径
+- 当前能力边界：Codex App Native 宿主路径 + Cursor Agent、Claude Code、Codex CLI 三个 external CLI Adapter
 - 验收基线：Wave 0–4 `experimental` + project-adoption hardening；Wave 5 领域试点尚未启动
 
 ## 1. 执行摘要
@@ -15,7 +15,7 @@
 - Native 或外部 CLI Adapter 负责把统一执行意图映射到具体宿主；
 - Provider 退出、Agent 自述成功或 tool payload 都不直接等于完成；
 - identity、workspace、session、task canary、terminal event 和 durable artifact 共同构成完成证据；
-- 节点完成后默认停在人工检查点，用户批准后才可进入下一个节点。
+- 普通 protocol v1 节点完成后停在人工检查点；role-first collaboration 的 validated completion 由专用 technical release 推进冻结 DAG，不伪造人工批准。
 
 因此，它解决的核心问题是“如何可靠地派发、恢复和验收一次 Agent 执行”，而不是提供 daemon、看板、长驻队列或生产级自治平台。
 
@@ -30,7 +30,7 @@ flowchart LR
     Policy["Policy<br/>binding / workspace / MCP / retry / fallback"]
     Store["File Store<br/>versioned snapshot + events + request journal + OS lock"]
     Native["Codex App Native<br/>App 原生 subagent"]
-    Bridge["Host-action bridge<br/>当前由 Controller/集成层承担"]
+    Bridge["agent-workflow-bridge<br/>external CLI public bridge"]
     Cursor["Cursor Adapter"]
     Claude["Claude Adapter"]
     Codex["Codex CLI Adapter"]
@@ -259,11 +259,13 @@ durable last message、已识别的 structured agent message、plain final stdou
 2. [`agent-workflow-core --gateway`](../../cmd/agent-workflow-core/main.go) 的 stdin/stdout one-shot CLI；
 3. [`install_controller_skill.ps1`](../../tools/orchestration/install_controller_skill.ps1) 生成的消费仓库 Skill + lock receipt；
 4. [`multi-agent-orchestration` Controller Skill](../../skills/multi-agent-orchestration/SKILL.md) 的 Native host loop；
-5. 项目内显式 artifact 合同。
+5. [`agent-workflow-collaboration`](../../cmd/agent-workflow-collaboration/main.go) 的 role-first 三态路由/运行创建入口；
+6. [`agent-workflow-bridge`](../../cmd/agent-workflow-bridge/main.go) 的 external CLI preflight/HostAction 入口；
+7. 项目内显式 artifact 合同。
 
 `internal/` 下的 Go 包不能被其他 Go module 直接 import。这是有意的仓库边界：具体项目应通过 CLI/protocol 使用核心，而不是依赖内部实现。
 
-当前没有统一的外部 Adapter executor CLI。Cursor/Claude/Codex CLI Adapter 已有真实 smoke 和 conformance，但要接入具体项目，仍需要一个位于 toolkit module 内的薄 host-action bridge，或后续增加正式 executor command。该缺口不影响 Codex App Native 最小路径，但会影响外部 CLI 的“一键接入”体验。
+`agent-workflow-bridge` 已把 core-issued `launch`、`observe`、`cancel_host` 映射到 Cursor、Claude、Codex CLI，并通过 machine-local owner receipt + loopback IPC 保留原进程/session；Codex App Native 不经过该 bridge，仍由 Controller Skill 调用 App 原生 capability。业务仓库不得 import `internal/adapters/*`、拼 Provider shell 或自行构造 `HostActionResult`。
 
 protocol v1 的 runtime operation registry 与静态 `request.schema.json` 已同时包含 `prepareRetryAttempt` 和 `prepareFallbackAttempt`，并由测试比较 operation 集合。`agent-workflow-core --validate-request` 明确只做 envelope validation，成功返回 `envelope_valid`；operation-specific payload 仍由 Gateway dispatch 的 strict decoder 校验。
 
@@ -305,7 +307,7 @@ protocol v1 的 runtime operation registry 与静态 `request.schema.json` 已�
 
 ### 仍是工程化缺口
 
-- 外部 CLI Adapter 尚无统一 executor command/安装器；
+- role-first clean-consumer 安装、public bridge 三 CLI handoff 和 Codex App Native role-first smoke 已有实现与证据；当前发布门槛只保留最终独立 closure 和全量回归收口；
 - 还没有 state schema migration；当前升级合同是新 state-dir + 保留旧 evidence；
 - Gateway v1 不提供 in-place delivery-only `send`，`delivery_missing` 需要人工 revision/abort；
 - Task close 与 Node `running` 尚无公开 Gateway 转换，当前以 Attempt 和节点检查点表达执行进度；
