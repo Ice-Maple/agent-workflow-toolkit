@@ -14,6 +14,32 @@ import (
 )
 
 func LoadProfile(path string) (Profile, error) {
+	profile, err := decodeProfile(path)
+	if err != nil {
+		return Profile{}, err
+	}
+	if err := validateProfile(profile); err != nil {
+		return Profile{}, err
+	}
+	return profile, nil
+}
+
+// HashProfile loads a strict machine-local profile whose profile_hash may be
+// empty or stale, replaces it with the canonical AdapterProfile hash, and
+// returns the complete profile for persistence. It does not execute a Provider.
+func HashProfile(path string) (orchestration.AdapterProfile, error) {
+	profile, err := decodeProfile(path)
+	if err != nil {
+		return orchestration.AdapterProfile{}, err
+	}
+	if strings.TrimSpace(profile.ID) == "" || normalizeProvider(profile.Adapter) != profile.Adapter {
+		return orchestration.AdapterProfile{}, errors.New("profile id and canonical adapter are required")
+	}
+	profile.ProfileHash = orchestration.HashAdapterProfile(profile.AdapterProfile)
+	return profile.AdapterProfile, nil
+}
+
+func decodeProfile(path string) (Profile, error) {
 	if strings.TrimSpace(path) == "" {
 		return Profile{}, errors.New("profile file is required")
 	}
@@ -36,9 +62,6 @@ func LoadProfile(path string) (Profile, error) {
 	}
 	if profile.TrustAuthorized || trustedProfileValue(profile.Trust) {
 		profile.TrustAuthorized = true
-	}
-	if err := validateProfile(profile); err != nil {
-		return Profile{}, err
 	}
 	return profile, nil
 }

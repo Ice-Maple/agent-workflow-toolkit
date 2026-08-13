@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"agent-workflow-toolkit/internal/buildinfo"
 	"agent-workflow-toolkit/internal/gateway"
 	"agent-workflow-toolkit/internal/orchestration"
 	"agent-workflow-toolkit/internal/policy"
@@ -288,11 +289,11 @@ func TestControllerSkillInstallerCreatesVerifiableReceipt(t *testing.T) {
 	if err != nil {
 		t.Skip("Windows PowerShell is unavailable")
 	}
-	binary := buildAdoptionBinary(t)
+	binaries := buildAdoptionBinaries(t)
 	consumer := t.TempDir()
 	repositoryRoot := filepath.Clean(filepath.Join(mustWorkingDirectory(t), "..", ".."))
 	installer := filepath.Join(repositoryRoot, "tools", "orchestration", "install_controller_skill.ps1")
-	baseArgs := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer, "-ToolkitRoot", repositoryRoot, "-ConsumerRoot", consumer, "-CorePath", binary, "-Mode", "Copy", "-AllowDirty"}
+	baseArgs := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer, "-ToolkitRoot", repositoryRoot, "-ConsumerRoot", consumer, "-CorePath", binaries.Core, "-CollaborationPath", binaries.Collaboration, "-BridgePath", binaries.Bridge, "-Mode", "Copy", "-AllowDirty"}
 	install := exec.Command(powershell, baseArgs...)
 	if output, err := install.CombinedOutput(); err != nil {
 		t.Fatalf("install Controller Skill: %v\n%s", err, output)
@@ -310,17 +311,27 @@ func TestControllerSkillInstallerCreatesVerifiableReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	var receipt struct {
-		ToolkitCommit     string `json:"toolkit_commit"`
-		CoreRevision      string `json:"core_revision"`
-		CoreVersionOutput string `json:"core_version_output"`
-		CoreProtocol      int    `json:"core_protocol"`
-		CoreMaturity      string `json:"core_maturity"`
+		SchemaVersion int    `json:"schema_version"`
+		ToolkitCommit string `json:"toolkit_commit"`
+		Binaries      map[string]struct {
+			Path          string `json:"path"`
+			Revision      string `json:"revision"`
+			VersionOutput string `json:"version_output"`
+			Protocol      int    `json:"protocol"`
+			Maturity      string `json:"maturity"`
+		} `json:"binaries"`
 	}
 	if err := json.Unmarshal(receiptRaw, &receipt); err != nil {
 		t.Fatal(err)
 	}
-	if receipt.ToolkitCommit == "" || receipt.CoreRevision != receipt.ToolkitCommit || receipt.CoreProtocol != protocol.Major || receipt.CoreMaturity != maturity || !strings.Contains(receipt.CoreVersionOutput, "version=") {
+	if receipt.SchemaVersion != 2 || receipt.ToolkitCommit == "" || len(receipt.Binaries) != 3 {
 		t.Fatalf("installation receipt metadata = %#v", receipt)
+	}
+	for name, path := range map[string]string{"core": binaries.Core, "collaboration": binaries.Collaboration, "bridge": binaries.Bridge} {
+		record := receipt.Binaries[name]
+		if record.Path != path || record.Revision != receipt.ToolkitCommit || record.Protocol != protocol.Major || record.Maturity != buildinfo.Maturity || !strings.Contains(record.VersionOutput, "version=") {
+			t.Fatalf("installation receipt %s metadata = %#v", name, record)
+		}
 	}
 	checkArgs := append(append([]string(nil), baseArgs...), "-Check")
 	check := exec.Command(powershell, checkArgs...)
@@ -352,18 +363,19 @@ func TestRoleFirstInstallerCreatesCanonicalControllerReceipt(t *testing.T) {
 	if err != nil {
 		t.Skip("Windows PowerShell is unavailable")
 	}
-	binary := buildAdoptionBinary(t)
+	binaries := buildAdoptionBinaries(t)
 	consumer := t.TempDir()
 	repositoryRoot := filepath.Clean(filepath.Join(mustWorkingDirectory(t), "..", ".."))
 	installer := filepath.Join(repositoryRoot, "tools", "orchestration", "install_role_first_skill.ps1")
 	fixture := filepath.Join(repositoryRoot, "tests", "orchestration", "fixtures", "role-first")
-	baseArgs := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer, "-ToolkitRoot", repositoryRoot, "-ConsumerRoot", consumer, "-SkillSource", filepath.Join(fixture, "skill"), "-RolePackage", filepath.Join(fixture, "roles"), "-CorePath", binary, "-AllowDirty"}
+	baseArgs := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer, "-ToolkitRoot", repositoryRoot, "-ConsumerRoot", consumer, "-SkillSource", filepath.Join(fixture, "skill"), "-RolePackage", filepath.Join(fixture, "roles"), "-CorePath", binaries.Core, "-CollaborationPath", binaries.Collaboration, "-BridgePath", binaries.Bridge, "-AllowDirty"}
 	if output, err := exec.Command(powershell, baseArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("install role-first Skill: %v\n%s", err, output)
 	}
 	for _, expected := range []string{
 		filepath.Join(consumer, ".agents", "agent-workflow-toolkit.lock.json"),
 		filepath.Join(consumer, ".agents", "agent-workflow-role-first-skill.lock.json"),
+		filepath.Join(consumer, ".agents", "agent-workflow-role-first-entry.json"),
 		filepath.Join(consumer, ".agents", "skills", "multi-agent-orchestration", "SKILL.md"),
 	} {
 		if _, err := os.Stat(expected); err != nil {
@@ -373,6 +385,159 @@ func TestRoleFirstInstallerCreatesCanonicalControllerReceipt(t *testing.T) {
 	checkArgs := append(append([]string(nil), baseArgs...), "-Check")
 	if output, err := exec.Command(powershell, checkArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("check role-first Skill: %v\n%s", err, output)
+	}
+
+	controllerReceipt := filepath.Join(consumer, ".agents", "agent-workflow-toolkit.lock.json")
+	assertInstallerCheckFails := func(name string, mutate func()) {
+		t.Helper()
+		mutate()
+		if output, err := exec.Command(powershell, checkArgs...).CombinedOutput(); err == nil {
+			t.Fatalf("%s unexpectedly passed -Check: %s", name, output)
+		}
+	}
+	receiptRaw, err := os.ReadFile(controllerReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInstallerCheckFails("tampered receipt path", func() {
+		var receipt map[string]any
+		if err := json.Unmarshal(receiptRaw, &receipt); err != nil {
+			t.Fatal(err)
+		}
+		receipt["binaries"].(map[string]any)["bridge"].(map[string]any)["path"] = filepath.Join(t.TempDir(), "missing-bridge.exe")
+		updated, _ := json.MarshalIndent(receipt, "", "  ")
+		if err := os.WriteFile(controllerReceipt, append(updated, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := os.WriteFile(controllerReceipt, receiptRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bridgeBackup, err := os.ReadFile(binaries.Bridge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInstallerCheckFails("tampered binary", func() {
+		if err := os.WriteFile(binaries.Bridge, append(append([]byte(nil), bridgeBackup...), 0), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := os.WriteFile(binaries.Bridge, bridgeBackup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(powershell, checkArgs...).CombinedOutput(); err != nil {
+		t.Fatalf("restored role-first installation failed -Check: %v\n%s", err, output)
+	}
+	wrongVersionArgs := append([]string(nil), checkArgs...)
+	for index := range wrongVersionArgs {
+		if wrongVersionArgs[index] == binaries.Bridge {
+			wrongVersionArgs[index] = binaries.Collaboration
+			break
+		}
+	}
+	if output, err := exec.Command(powershell, wrongVersionArgs...).CombinedOutput(); err == nil {
+		t.Fatalf("wrong bridge command/version unexpectedly passed -Check: %s", output)
+	}
+}
+
+func TestFreshConsumerBusinessSkillOnlyEntrySmoke(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the managed business-Skill entry is currently a Windows host path")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is unavailable")
+	}
+	binaries := buildAdoptionBinaries(t)
+	repositoryRoot := filepath.Clean(filepath.Join(mustWorkingDirectory(t), "..", ".."))
+	smoke := filepath.Join(repositoryRoot, "tools", "orchestration", "smoke_business_skill_entry.ps1")
+	arguments := []string{
+		"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", smoke,
+		"-ToolkitRoot", repositoryRoot,
+		"-CorePath", binaries.Core,
+		"-CollaborationPath", binaries.Collaboration,
+		"-BridgePath", binaries.Bridge,
+		"-AllowDirty",
+	}
+	output, err := exec.Command(powershell, arguments...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("business-Skill-only smoke: %v\n%s", err, output)
+	}
+	var result struct {
+		Status                  string `json:"status"`
+		ZeroInstall             string `json:"zero_install"`
+		Direct                  string `json:"direct"`
+		Single                  string `json:"single"`
+		Framework               string `json:"framework"`
+		Disable                 string `json:"disable"`
+		RequestedInstances      int    `json:"requested_instances"`
+		ActualInstances         int    `json:"actual_instances"`
+		PinnedCollaborationPath string `json:"pinned_collaboration_path"`
+		PinnedBridgePath        string `json:"pinned_bridge_path"`
+		MissingPathFailClosed   bool   `json:"missing_path_fail_closed"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode business-Skill-only smoke: %v\n%s", err, output)
+	}
+	if result.Status != "passed" || result.ZeroInstall != "execute_business_skill" || result.Direct != "ordinary_delegation" || result.Single != "execute_sequentially" || result.Framework != "framework_controller" || result.Disable != "direct" || result.RequestedInstances != 2 || result.ActualInstances != 2 || !result.MissingPathFailClosed {
+		t.Fatalf("business-Skill-only result = %#v", result)
+	}
+	if result.PinnedCollaborationPath != binaries.Collaboration || result.PinnedBridgePath != binaries.Bridge {
+		t.Fatalf("business-Skill-only entry did not use receipt paths: %#v", result)
+	}
+}
+
+func TestFreshConsumerBusinessSkillOnlyEntrySupportsHyphenatedSkillName(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the managed business-Skill entry is currently a Windows host path")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is unavailable")
+	}
+	binaries := buildAdoptionBinaries(t)
+	repositoryRoot := filepath.Clean(filepath.Join(mustWorkingDirectory(t), "..", ".."))
+	smoke := filepath.Join(repositoryRoot, "tools", "orchestration", "smoke_business_skill_entry.ps1")
+	arguments := []string{
+		"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", smoke,
+		"-ToolkitRoot", repositoryRoot,
+		"-CorePath", binaries.Core,
+		"-CollaborationPath", binaries.Collaboration,
+		"-BridgePath", binaries.Bridge,
+		"-BusinessSkill", "sample-role-first-review",
+		"-AllowDirty",
+	}
+	if output, err := exec.Command(powershell, arguments...).CombinedOutput(); err != nil {
+		t.Fatalf("hyphenated business-Skill entry smoke: %v\n%s", err, output)
+	}
+}
+
+type adoptionBinaries struct {
+	Core          string
+	Collaboration string
+	Bridge        string
+}
+
+func buildAdoptionBinaries(t *testing.T) adoptionBinaries {
+	t.Helper()
+	root := t.TempDir()
+	repositoryRoot := filepath.Clean(filepath.Join(mustWorkingDirectory(t), "..", ".."))
+	build := func(name, packagePath string) string {
+		binary := filepath.Join(root, name)
+		if runtime.GOOS == "windows" {
+			binary += ".exe"
+		}
+		command := exec.Command("go", "build", "-o", binary, packagePath)
+		command.Dir = repositoryRoot
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("build %s adoption CLI: %v\n%s", name, err, output)
+		}
+		return binary
+	}
+	return adoptionBinaries{
+		Core:          build("agent-workflow-core", "./cmd/agent-workflow-core"),
+		Collaboration: build("agent-workflow-collaboration", "./cmd/agent-workflow-collaboration"),
+		Bridge:        build("agent-workflow-bridge", "./cmd/agent-workflow-bridge"),
 	}
 }
 

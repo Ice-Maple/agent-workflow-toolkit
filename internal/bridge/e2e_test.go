@@ -26,7 +26,60 @@ func TestPublicBridgeRoleFirstHandoff(t *testing.T) {
 	}
 }
 
+func TestFreshConsumerReceiptPinnedBridgeRoleFirstHandoff(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the Role-first installer is currently a Windows adoption path")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is unavailable")
+	}
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer := t.TempDir()
+	coreBinary := buildCoreExecutable(t)
+	bridgeBinary := buildBridgeExecutable(t)
+	collaborationBinary := buildCollaborationExecutable(t)
+	installer := filepath.Join(repositoryRoot, "tools", "orchestration", "install_role_first_skill.ps1")
+	fixture := filepath.Join(repositoryRoot, "tests", "orchestration", "fixtures", "role-first")
+	arguments := []string{
+		"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer,
+		"-ToolkitRoot", repositoryRoot, "-ConsumerRoot", consumer,
+		"-SkillSource", filepath.Join(fixture, "skill"), "-RolePackage", filepath.Join(fixture, "roles"),
+		"-CorePath", coreBinary, "-CollaborationPath", collaborationBinary, "-BridgePath", bridgeBinary,
+		"-AllowDirty",
+	}
+	if output, err := exec.Command(powershell, arguments...).CombinedOutput(); err != nil {
+		t.Fatalf("install fresh consumer: %v\n%s", err, output)
+	}
+	receiptRaw, err := os.ReadFile(filepath.Join(consumer, ".agents", "agent-workflow-toolkit.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt struct {
+		Binaries map[string]struct {
+			Path string `json:"path"`
+		} `json:"binaries"`
+	}
+	if err := json.Unmarshal(receiptRaw, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	receiptCore := receipt.Binaries["core"].Path
+	receiptBridge := receipt.Binaries["bridge"].Path
+	if receiptCore != coreBinary || receiptBridge != bridgeBinary {
+		t.Fatalf("receipt paths core=%q bridge=%q", receiptCore, receiptBridge)
+	}
+	runPublicBridgeRoleFirstHandoffWithBinaries(t, ProviderCursor, receiptBridge, receiptCore)
+}
+
 func runPublicBridgeRoleFirstHandoff(t *testing.T, adapter string) {
+	t.Helper()
+	runPublicBridgeRoleFirstHandoffWithBinaries(t, adapter, buildBridgeExecutable(t), buildCoreExecutable(t))
+}
+
+func runPublicBridgeRoleFirstHandoffWithBinaries(t *testing.T, adapter, bridgeBinary, coreBinary string) {
 	t.Helper()
 	root := t.TempDir()
 	workspace := filepath.Join(root, "workspace")
@@ -36,8 +89,6 @@ func runPublicBridgeRoleFirstHandoff(t *testing.T, adapter string) {
 	if err := os.Mkdir(workspace, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	bridgeBinary := buildBridgeExecutable(t)
-	coreBinary := buildCoreExecutable(t)
 	providerBinary := buildFixtureProvider(t)
 	profile := fixtureProfile(t, adapter, providerBinary)
 	role := "fixture/reviewer"
@@ -281,6 +332,24 @@ func buildCoreExecutable(t *testing.T) string {
 	command.Dir = root
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build core: %v\n%s", err, output)
+	}
+	return binary
+}
+
+func buildCollaborationExecutable(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "agent-workflow-collaboration")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	command := exec.Command("go", "build", "-o", binary, "./cmd/agent-workflow-collaboration")
+	command.Dir = root
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build collaboration: %v\n%s", err, output)
 	}
 	return binary
 }

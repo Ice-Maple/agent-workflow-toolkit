@@ -1,6 +1,8 @@
 # Agent Workflow Toolkit
 
-面向 Agent 工作方式、能力扩展和工程实践的通用工具仓库。多 Agent 协同 MVP 的 Wave 0–4 已完成，Codex App Native 宿主路径与三个 external CLI Adapter 的受控只读执行已验收为 `experimental`；role-first 可选协作入口正在按 U0–U3 收口，Wave 5 尚未启动。
+面向 Agent 工作方式、能力扩展和工程实践的通用工具仓库。多 Agent 协同 MVP 的 Wave 0–4 与 role-first U0–U3 已完成：Codex App Native 宿主路径、三个 external CLI Adapter、Role Package、三态路由和 technical release 的受控只读执行均已验收为 `experimental`；Wave 5 尚未启动。
+
+Role-first installer 会用 schema-v2 receipt 固定同一 clean revision 的 core、collaboration、bridge 三个 binary，并安装统一 managed business-Skill entry。正常用户只调用业务 Skill；`zero-install/direct/single/framework` 路由由 Controller 一处承载，不要求业务 Skill 复制底层编排。
 
 ## 仓库定位
 
@@ -72,4 +74,4 @@ SQLite、看板、daemon、tmux、完整 mailbox、OpenCode/Kilo 和复杂恢复
 - [oh-my-openagent 研究](docs/research/2026-08-06-oh-my-openagent-multi-agent-study.md)
 - [Claude Codex Bridge 研究](docs/research/2026-08-06-claude-codex-bridge-multi-agent-study.md)
 
-当前多 Agent 运行时已覆盖 Codex App Native、Cursor Agent、Claude Code 和 Codex CLI 的受控只读路径，并已完成跨 Adapter replay/conformance、Windows 稳定性、安全策略、完整 smoke/benchmark 与人工 `experimental` 验收。后续只有在另行授权后才进入 Wave 5 领域试点；当前不扩展 SQLite、daemon、dashboard 或领域业务规则。
+当前多 Agent 运行时已覆盖 Codex App Native、Cursor Agent、Claude Code 和 Codex CLI 的受控只读路径，并已完成 role-first U0–U3、跨 Adapter replay/conformance、Windows 稳定性、安全策略、完整 smoke/benchmark 与人工 `experimental` 验收。业务侧通常只定义 Role Prompt 和 `role/task/count/after`，本机 route 决定 Adapter/model；后续只有在另行授权后才进入 Wave 5 领域试点。

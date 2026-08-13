@@ -12,6 +12,10 @@
 - Linux `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./...`: PASS
 - `git diff --check`: PASS
 - clean consumer Skill + Role Package install and `-Check`: PASS
+- schema-v2 canonical receipt records core/collaboration/bridge canonical path, SHA-256, unified version/protocol/maturity/revision/dirty; path replacement and binary tampering fail closed
+- fresh-consumer business-Skill-only smoke: zero-install preserves the original Skill body; default-off routes direct; single forbids spawn/Gateway; framework creates two distinct instances with frozen Role Prompt hashes; disable returns to truthful direct routing
+- managed entry invoked the receipt-pinned collaboration path; fresh-consumer E2E then used the receipt-pinned core/bridge paths for Cursor fixture preflight/launch/cross-process observe/completion/technical release; missing pinned path failed closed instead of searching PATH
+- managed entry revalidates installed business Skill and Role Package tree hashes plus registry/receipt target and toolkit commit bindings before routing
 - direct route with requested count 2: reported `effective_mode=direct`, `actual_instances=0`, `degraded=true`; no Gateway run was invented
 - framework route with requested count 2: created one Task, one frozen run and two distinct ready instances with the machine-local Cursor binding
 - bridge mismatch/stale owner/receipt redaction tests: PASS
@@ -69,6 +73,10 @@ upstream outputs, shared Role Package installation, the canonical Controller
 receipt, truthful shutdown status classification and durable convergence
 writeback. The final targeted re-check returned `PASS` with no remaining P0/P1;
 the reviewer also reran `go test -count=1 ./...` and `git diff --check`.
+
+The minimum-release follow-up added the unified three-binary receipt and
+business-Skill-only managed entry. Its final targeted review is recorded in
+[`role-first-minimum-release-targeted-review.md`](../../../../docs/reviews/2026-08-13-role-first-minimum-release-targeted-review.md).
 
 ## Remaining acceptance boundary
 

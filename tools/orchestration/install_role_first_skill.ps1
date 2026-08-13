@@ -15,6 +15,12 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$CorePath,
 
+    [Parameter(Mandatory = $true)]
+    [string]$CollaborationPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$BridgePath,
+
     [switch]$Check,
     [switch]$AllowDirty
 )
@@ -53,6 +59,8 @@ $consumer = Resolve-ExistingPath $ConsumerRoot 'ConsumerRoot'
 $skill = Resolve-ExistingPath $SkillSource 'SkillSource'
 $roles = Resolve-ExistingPath $RolePackage 'RolePackage'
 $core = Resolve-ExistingPath $CorePath 'CorePath'
+$collaborationBinary = Resolve-ExistingPath $CollaborationPath 'CollaborationPath'
+$bridge = Resolve-ExistingPath $BridgePath 'BridgePath'
 $sidecar = Join-Path $skill 'collaboration.yaml'
 $rolesManifest = Join-Path $roles 'roles.yaml'
 if (-not (Test-Path -LiteralPath (Join-Path $skill 'SKILL.md') -PathType Leaf)) { throw 'SkillSource is missing SKILL.md' }
@@ -80,6 +88,7 @@ $controllerTarget = Join-Path $consumer '.agents\skills\multi-agent-orchestratio
 $controllerReceipt = Join-Path $consumer '.agents\agent-workflow-toolkit.lock.json'
 $controllerInstaller = Join-Path $toolkit 'tools\orchestration\install_controller_skill.ps1'
 $receiptPath = Join-Path $consumer ".agents\agent-workflow-role-first-$skillName.lock.json"
+$entryRegistryPath = Join-Path $consumer '.agents\agent-workflow-role-first-entry.json'
 $skillHash = Get-TreeHash $skill
 $rolesHash = Get-TreeHash $roles
 
@@ -92,7 +101,20 @@ if ($Check) {
     Assert-Equal (Get-TreeHash $skillTarget) $skillHash 'installed skill hash'
     Assert-Equal (Get-TreeHash $rolesTarget) $rolesHash 'installed Role Package hash'
     Assert-Equal (Get-TreeHash $controllerTarget) (Get-TreeHash $controllerSource) 'installed Controller Skill hash'
-    $controllerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $controllerInstaller, '-ToolkitRoot', $toolkit, '-ConsumerRoot', $consumer, '-CorePath', $core, '-Mode', 'Copy', '-Check')
+    if ($receipt.schema_version -ne 2) { throw "unsupported role-first receipt schema: $($receipt.schema_version)" }
+    Assert-Equal ([string]$receipt.controller_receipt) ([System.IO.Path]::GetFullPath($controllerReceipt)) 'controller_receipt'
+    Assert-Equal ([string]$receipt.entry_registry) ([System.IO.Path]::GetFullPath($entryRegistryPath)) 'entry_registry'
+    if (-not (Test-Path -LiteralPath $entryRegistryPath -PathType Leaf)) { throw "managed entry registry is missing: $entryRegistryPath" }
+    $entryRegistry = Get-Content -LiteralPath $entryRegistryPath -Raw | ConvertFrom-Json
+    if ($entryRegistry.schema_version -ne 1) { throw "unsupported managed entry registry schema: $($entryRegistry.schema_version)" }
+    $entryProperty = $entryRegistry.business_skills.PSObject.Properties[$skillName]
+    $entry = if ($null -eq $entryProperty) { $null } else { $entryProperty.Value }
+    if ($null -eq $entry) { throw "managed entry is missing for business Skill: $skillName" }
+    Assert-Equal ([string]$entry.skill_path) ([System.IO.Path]::GetFullPath($skillTarget)) 'managed skill_path'
+    Assert-Equal ([string]$entry.collaboration_file) ([System.IO.Path]::GetFullPath((Join-Path $skillTarget 'collaboration.yaml'))) 'managed collaboration_file'
+    Assert-Equal ([string]$entry.roles_manifest) ([System.IO.Path]::GetFullPath((Join-Path $rolesTarget 'roles.yaml'))) 'managed roles_manifest'
+    Assert-Equal ([string]$entry.role_receipt) ([System.IO.Path]::GetFullPath($receiptPath)) 'managed role_receipt'
+    $controllerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $controllerInstaller, '-ToolkitRoot', $toolkit, '-ConsumerRoot', $consumer, '-CorePath', $core, '-CollaborationPath', $collaborationBinary, '-BridgePath', $bridge, '-Mode', 'Copy', '-Check')
     if ($AllowDirty) { $controllerArgs += '-AllowDirty' }
     & powershell.exe @controllerArgs | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'canonical Controller installation receipt validation failed' }
@@ -103,7 +125,7 @@ if ($Check) {
 foreach ($target in @($skillTarget, $receiptPath)) {
     if (Test-Path -LiteralPath $target) { throw "target already exists; run -Check or remove the exact target before reinstalling: $target" }
 }
-$controllerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $controllerInstaller, '-ToolkitRoot', $toolkit, '-ConsumerRoot', $consumer, '-CorePath', $core, '-Mode', 'Copy')
+$controllerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $controllerInstaller, '-ToolkitRoot', $toolkit, '-ConsumerRoot', $consumer, '-CorePath', $core, '-CollaborationPath', $collaborationBinary, '-BridgePath', $bridge, '-Mode', 'Copy')
 if ($AllowDirty) { $controllerArgs += '-AllowDirty' }
 if ((Test-Path -LiteralPath $controllerTarget) -or (Test-Path -LiteralPath $controllerReceipt)) {
     $controllerArgs += '-Check'
@@ -124,10 +146,11 @@ if (-not $rolePackageReused) { Copy-Item -LiteralPath $roles -Destination $roles
 $gitCommit = (& git -C $toolkit rev-parse HEAD 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw "cannot resolve toolkit commit: $gitCommit" }
 $receipt = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     toolkit_root = $toolkit
     toolkit_commit = $gitCommit
-    core_path = $core
+    controller_receipt = [System.IO.Path]::GetFullPath($controllerReceipt)
+    entry_registry = [System.IO.Path]::GetFullPath($entryRegistryPath)
     skill_source = $skill
     skill_source_sha256 = $skillHash
     skill_target = $skillTarget
@@ -142,4 +165,20 @@ $receipt = [ordered]@{
     installed_at = [DateTime]::UtcNow.ToString('o')
 }
 [System.IO.File]::WriteAllText($receiptPath, (($receipt | ConvertTo-Json -Depth 6) + [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
+$entryRegistry = if (Test-Path -LiteralPath $entryRegistryPath -PathType Leaf) {
+    Get-Content -LiteralPath $entryRegistryPath -Raw | ConvertFrom-Json
+}
+else {
+    [pscustomobject]@{ schema_version = 1; controller_receipt = [System.IO.Path]::GetFullPath($controllerReceipt); business_skills = [pscustomobject]@{} }
+}
+if ($entryRegistry.schema_version -ne 1) { throw "unsupported managed entry registry schema: $($entryRegistry.schema_version)" }
+Assert-Equal ([string]$entryRegistry.controller_receipt) ([System.IO.Path]::GetFullPath($controllerReceipt)) 'managed controller_receipt'
+if ($null -ne $entryRegistry.business_skills.PSObject.Properties[$skillName]) { throw "managed entry already exists for business Skill: $skillName" }
+$entryRegistry.business_skills | Add-Member -NotePropertyName $skillName -NotePropertyValue ([ordered]@{
+    skill_path = [System.IO.Path]::GetFullPath($skillTarget)
+    collaboration_file = [System.IO.Path]::GetFullPath((Join-Path $skillTarget 'collaboration.yaml'))
+    roles_manifest = [System.IO.Path]::GetFullPath((Join-Path $rolesTarget 'roles.yaml'))
+    role_receipt = [System.IO.Path]::GetFullPath($receiptPath)
+})
+[System.IO.File]::WriteAllText($entryRegistryPath, (($entryRegistry | ConvertTo-Json -Depth 8) + [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
 [pscustomobject]@{ status = 'installed'; skill_target = $skillTarget; role_package_target = $rolesTarget; role_package_reused = $rolePackageReused; receipt = $receiptPath } | ConvertTo-Json

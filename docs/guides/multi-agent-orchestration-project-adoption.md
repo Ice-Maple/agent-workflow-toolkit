@@ -49,22 +49,27 @@ steps:
     count: 2
 ```
 
-先构建三个公开命令，再安装 Controller Skill 或带 Role 依赖的业务 Skill：
+先从同一个 pinned clean checkout 把三个公开命令构建到 checkout 外，再安装带 Role 依赖的业务 Skill：
 
 ```powershell
-go build -o .\bin\agent-workflow-core.exe .\cmd\agent-workflow-core
-go build -o .\bin\agent-workflow-collaboration.exe .\cmd\agent-workflow-collaboration
-go build -o .\bin\agent-workflow-bridge.exe .\cmd\agent-workflow-bridge
+$Dist = Join-Path $env:LOCALAPPDATA "agent-workflow-toolkit\dist\$PinnedCommit"
+$Core = Join-Path $Dist 'agent-workflow-core.exe'
+$Collaboration = Join-Path $Dist 'agent-workflow-collaboration.exe'
+$Bridge = Join-Path $Dist 'agent-workflow-bridge.exe'
+New-Item -ItemType Directory -Force -Path $Dist | Out-Null
+go build -o $Core .\cmd\agent-workflow-core
+go build -o $Collaboration .\cmd\agent-workflow-collaboration
+go build -o $Bridge .\cmd\agent-workflow-bridge
 
 .\tools\orchestration\install_role_first_skill.ps1 `
   -ToolkitRoot $ToolkitRoot -ConsumerRoot $ConsumerRoot `
   -SkillSource $BusinessSkill -RolePackage $RolePackage `
-  -CorePath .\bin\agent-workflow-core.exe
+  -CorePath $Core -CollaborationPath $Collaboration -BridgePath $Bridge
 ```
 
-该安装器会复制业务 Skill、其声明的 Role Package 和 framework Controller Skill，并写入来源/hash receipt；相同 package/version/hash 的共享 Role Package 会复用，内容冲突则 fail closed。三个 `.exe` 仍由 toolkit checkout 构建并固定路径，不会复制进业务仓库。
+该安装器会复制业务 Skill、其声明的 Role Package 和 framework Controller Skill，并写入来源/hash receipt 与 `.agents/agent-workflow-role-first-entry.json` managed trigger registry；相同 package/version/hash 的共享 Role Package 会复用，内容冲突则 fail closed。三个 `.exe` 固定在本机 versioned dist，不会复制进业务仓库。
 
-安装后新建宿主任务。用户仍只调用业务 Skill；Router 读取 sidecar 并调用：
+安装后新建宿主任务。用户仍只调用业务 Skill；宿主在正常 Skill-dispatch 决策中发现已安装 Controller 后，根据 managed registry 进入 `invoke_business_skill.ps1`，从 schema-v2 receipt 读取并校验三个 binary 的 canonical absolute path，再调用 collaboration Router。业务 Skill 不需要显式调用 Controller 或下面的命令；下列命令仅用于理解和排障。这是 task-start Skill discovery 后的 managed host-policy 合同，不是能够拦截“未发现 Controller 的宿主”的 OS hook；fresh task discovery 是保留的人工边界。
 
 ```powershell
 agent-workflow-collaboration.exe `
@@ -79,6 +84,30 @@ agent-workflow-collaboration.exe `
 
 返回 `direct` 时走宿主普通委派并如实报告不保证独立实例数；返回 `single` 时禁止 spawn/Gateway；只有 `framework` 才返回 Task、run、ready instances，并由 Controller 继续执行。安装不等于启用：machine gate 默认关闭，workspace 默认 `direct`。
 
+Router 完全未安装时，业务 Skill 的完整正文照常执行；已安装但 gate 默认关闭时为 `direct`；`single` 由当前 Agent 串行执行且禁止 spawn/Gateway；`framework` 才进入 Controller/Gateway。一旦 framework admission 已选择，Role/route/preflight/permission/workspace/MCP 或运行证据失败必须 fail closed，不允许偷偷改走 `direct`。
+
+### 2.2 启用、回退与一键关闭
+
+Role-first 安装保持零行为变化。需要启用 framework 时，必须显式配置同一个 machine-local coordination root：
+
+```powershell
+$CoordinationDir = Join-Path $env:LOCALAPPDATA 'agent-workflow-toolkit\coordination'
+& $Core --coordination-dir $CoordinationDir --enable
+& $Core --coordination-dir $CoordinationDir --set-workspace-mode `
+  --workspace $ConsumerRoot --workspace-mode framework
+& $Core --coordination-dir $CoordinationDir --status --workspace $ConsumerRoot
+```
+
+只有 status 同时返回 `framework_enabled=true` 和 `effective_mode=framework` 才会创建 run。将 workspace mode 改为 `direct` 可保留业务 Skill、改走宿主普通委派；改为 `single` 则由当前 Agent 串行执行且禁止 spawn/Gateway。
+
+```powershell
+& $Core --coordination-dir $CoordinationDir --set-workspace-mode `
+  --workspace $ConsumerRoot --workspace-mode direct
+& $Core --coordination-dir $CoordinationDir --disable
+```
+
+`--disable` 先关闭新 admission、递增 gate epoch，再按 active-run 索引收敛已有 Attempt；返回的 run 状态可能是 `cancelled`、`cancel_pending`、`not_contacted`、`stale_owner` 或 `outcome_unknown`。它不伪造 Provider 已取消，也不替代业务审批；`cancel_pending`/`outcome_unknown` 必须保留 state/owner evidence 人工处理。
+
 ## 3. 推荐部署拓扑
 
 不要把 toolkit 的 runtime state 复制进业务仓库。推荐保留两个独立 checkout/目录：
@@ -86,13 +115,21 @@ agent-workflow-collaboration.exe `
 ```text
 E:\tools\agent-workflow-toolkit\          # 固定版本的通用框架
 E:\projects\sample-project\              # 具体项目
+  ├─ .agents\skills\<business-skill>\       # 业务 Skill + collaboration.yaml
   ├─ .agents\skills\multi-agent-orchestration\ # 已安装的 Controller Skill
-  ├─ .agents\agent-workflow-toolkit.lock.json   # core/Skill 来源 receipt
+  ├─ .agents\roles\<role-package>\           # roles.yaml + complete Prompt templates
+  ├─ .agents\agent-workflow-toolkit.lock.json   # 三 binary/Skill 来源 receipt
+  ├─ .agents\agent-workflow-role-first-<skill>.lock.json
+  ├─ .agents\agent-workflow-role-first-entry.json # 统一 managed business-Skill trigger registry
   └─ reports\agent-review.md                    # 显式交付物，可按项目规则决定是否提交
 
-%LOCALAPPDATA%\agent-workflow-toolkit\sample-project\core-0.2.0-p1-<commit>\
-  ├─ policy.local.json                     # 本机 binding；不含凭据
-  └─ state\                                # snapshot / events / receipts
+%LOCALAPPDATA%\agent-workflow-toolkit\
+  ├─ dist\<commit>\                        # 三个公开 binary
+  ├─ coordination\                         # machine gate / workspace mode / active-run index
+  └─ sample-project\core-0.2.0-p1-<commit>\
+       ├─ policy.local.json                 # 本机 route/profile；不含凭据
+       ├─ bridge\                           # owner receipt；不含 bearer capability
+       └─ state\                            # snapshot / events / request receipts
 ```
 
 职责分配：
@@ -100,7 +137,8 @@ E:\projects\sample-project\              # 具体项目
 | 内容 | 放置位置 |
 | --- | --- |
 | 通用核心、Adapter、Controller contract | `agent-workflow-toolkit` |
-| 项目目标、角色语义、Prompt、required sections、业务验收 | 具体项目 |
+| `role/task/count/after`、Role Prompt、required sections、业务验收 | 具体项目或可移植 Workflow |
+| Adapter/model/reasoning/permission/workspace route 与 external profile | machine-local policy/profile |
 | provider token/登录态 | CLI/宿主自己的凭据存储，不进入任何项目文件 |
 | Gateway runtime state | 用户级或项目外 `state-dir` |
 | Controller Skill 与来源 receipt | 消费仓库 `.agents/`；是否提交由项目治理决定 |
@@ -116,6 +154,8 @@ $ToolkitRoot = 'E:\tools\agent-workflow-toolkit'
 $ConsumerRoot = 'E:\projects\sample-project'
 $CoreInstallRoot = Join-Path $env:LOCALAPPDATA "agent-workflow-toolkit\dist\$PinnedCommit"
 $Core = Join-Path $CoreInstallRoot 'agent-workflow-core.exe'
+$Collaboration = Join-Path $CoreInstallRoot 'agent-workflow-collaboration.exe'
+$Bridge = Join-Path $CoreInstallRoot 'agent-workflow-bridge.exe'
 
 Set-Location $ToolkitRoot
 git checkout --detach $PinnedCommit
@@ -123,13 +163,17 @@ if (git status --porcelain=v1) { throw 'toolkit checkout must be clean' }
 go test -count=1 ./...
 New-Item -ItemType Directory -Force -Path $CoreInstallRoot | Out-Null
 go build -o $Core .\cmd\agent-workflow-core
+go build -o $Collaboration .\cmd\agent-workflow-collaboration
+go build -o $Bridge .\cmd\agent-workflow-bridge
 & $Core --version
+& $Collaboration --version
+& $Bridge --version
 go version -m $Core
 ```
 
-`--version` 必须显示 `version=0.2.0 protocol=1 maturity=experimental revision=<PinnedCommit> dirty=false`；`revision=unknown`、commit 不同或 dirty 状态不符都不能安装为固定版本。
+三个 binary 的 `--version` 都必须显示统一的 `version=0.2.0 protocol=1 maturity=experimental revision=<PinnedCommit> dirty=false`，仅命令名前缀不同。`revision=unknown`、commit 不同或 dirty 状态不符都不能安装为固定版本。
 
-随后将同一 checkout 的 Controller Skill 安装到消费仓库。`Copy` 是最低权限路径；确认本机支持 symlink 时也可改用 `SymbolicLink`：
+没有业务 Skill/Role Package 的 legacy 高级接入，可以单独安装 Controller Skill。`Copy` 是最低权限路径；确认本机支持 symlink 时也可改用 `SymbolicLink`：
 
 ```powershell
 $Installer = Join-Path $ToolkitRoot 'tools\orchestration\install_controller_skill.ps1'
@@ -137,12 +181,16 @@ $Installer = Join-Path $ToolkitRoot 'tools\orchestration\install_controller_skil
   -ToolkitRoot $ToolkitRoot `
   -ConsumerRoot $ConsumerRoot `
   -CorePath $Core `
+  -CollaborationPath $Collaboration `
+  -BridgePath $Bridge `
   -Mode Copy
 
 & $Installer `
   -ToolkitRoot $ToolkitRoot `
   -ConsumerRoot $ConsumerRoot `
   -CorePath $Core `
+  -CollaborationPath $Collaboration `
+  -BridgePath $Bridge `
   -Check
 ```
 
@@ -150,21 +198,23 @@ $Installer = Join-Path $ToolkitRoot 'tools\orchestration\install_controller_skil
 
 - `$ConsumerRoot\.agents\skills\multi-agent-orchestration\`；
 - `$ConsumerRoot\.agents\agent-workflow-toolkit.lock.json`；
-- toolkit commit/dirty、core canonical path/SHA-256/version/protocol/maturity/revision/dirty、Skill source/target/tree hash 和安装模式。
+- toolkit commit/dirty、三个 binary 各自的 canonical path/SHA-256/version/protocol/maturity/revision/dirty、Skill source/target/tree hash 和安装模式。
 
 binary 必须构建到 checkout 外；如果把 `bin/` 之类未忽略目录写进 toolkit，安装器会按设计把 checkout 判为 dirty 并拒绝 receipt。安装器还会拒绝未知 VCS revision、core 与 checkout revision/dirty 不一致、已有目标和已有 receipt；`-AllowDirty` 仅供 toolkit 自身开发 smoke，不是消费项目接入方式。每次开始 Gateway Workflow 前先运行 `-Check`。安装或升级 Skill 后新建 Codex 任务，让宿主从消费仓库 `.agents/skills` 重新发现 Skill；不要静默使用全局旧副本。
 
 项目升级时先归档旧 receipt 和 evidence，使用新的 version-specific state-dir，再构建、重装、`-Check` 和 smoke。当前没有 state migration：不要让新 binary 写旧 state-dir，也不要让多个 checkout 共享同一个 state-dir。
 
-## 5. 准备本机 policy
+普通 Role-first 接入应使用第 2.1 节的 `install_role_first_skill.ps1`，并以相同参数执行 `-Check`；它会同时委托 canonical Controller installer 校验 `.agents\agent-workflow-toolkit.lock.json`，避免只安装业务 Skill 而漏掉 Controller receipt。
 
-Gateway 默认没有 registered binding，不提供“随便派发”的隐式默认值。为目标项目创建 `policy.local.json`。下面是 Native reviewer 模板：
+## 5. 准备本机 Role route 与 Adapter profile
+
+Gateway 不提供“随便派发”的隐式默认值。Role-first 使用 `role_routes` 把业务 role 映射到本机 binding；legacy 低层 API 仍使用 `registered_bindings`。下面是 Codex App Native reviewer 模板：
 
 ```json
 {
   "registered_bindings": [
     {
-      "role": "reviewer",
+      "role": "sample-workflow/reviewer",
       "adapter": "codex-native",
       "model": "your-registered-model",
       "reasoning": "high",
@@ -173,6 +223,20 @@ Gateway 默认没有 registered binding，不提供“随便派发”的隐式�
       "mcp_allowlist": []
     }
   ],
+  "role_routes": {
+    "sample-workflow/reviewer": {
+      "role": "sample-workflow/reviewer",
+      "primary": {
+        "role": "sample-workflow/reviewer",
+        "adapter": "codex-native",
+        "model": "your-registered-model",
+        "reasoning": "high",
+        "permission": "read-only",
+        "workspace": "E:\\projects\\sample-project",
+        "mcp_allowlist": []
+      }
+    }
+  },
   "retry_mode": "limited_auto",
   "max_auto_retries": 1,
   "fallback_mode": "ask",
@@ -184,16 +248,186 @@ Gateway 默认没有 registered binding，不提供“随便派发”的隐式�
 注意：
 
 - `workspace` 是本机 absolute canonical path，因此这个 policy 通常不直接提交；
-- node `role` 必须非空，并与 binding `role` 完全一致；`role/adapter/model/reasoning/permission/workspace/MCP allowlist` 必须和请求完全匹配；
+- Role-first role 使用 `<package>/<role>`，必须与 `roles.yaml`、`collaboration.yaml`、route key、route role 和 binding role 完全一致；
+- `role/adapter/model/reasoning/permission/workspace/MCP allowlist` 必须和已批准 binding 完全匹配；route binding 的空 workspace 会在 run 创建时解析为 canonical task workspace，但首轮建议显式写明；
 - 首轮保持 `read-only`、`goal_enabled=false` 和空 MCP allowlist；
 - policy 只记录声明，不保存 API key、token、header 或 provider base URL 中的凭据；
 - policy loader 对顶层和 nested binding 使用 strict JSON：未知字段、拼错字段和 trailing JSON 都会拒绝，不会静默落到默认值。
 
-外部 Adapter 的标识分别是 `cursor`、`claude`、`codexcli`。切换 Adapter 时必须新增完整 binding，并先单独通过对应 Adapter 的 capability preflight；不要只改一个字符串后沿用旧批准。
+外部 Adapter 的标识分别是 `cursor`、`claude`、`codexcli`。它们还要求 route binding 的 `profile_id` 引用同一 policy 的 `adapter_profiles`；profile 至少包含匹配的 `id`、`adapter`、非敏感执行参数和 `profile_hash`。先把单个 profile 保存为 JSON（`profile_hash` 可为空），再执行 `& $Bridge --hash-profile --profile-file $ProfileDraft | Set-Content -Encoding utf8NoBOM $ProfileFile` 生成 canonical profile；把同一对象复制到 policy 的 `adapter_profiles`。不要手算或只 hash 文件文本。切换 Adapter 时必须新增完整 route/profile 并通过 bridge preflight，不要只改一个字符串后沿用旧批准。
 
-## 6. 调用 Gateway
+例如 Cursor route/profile 的结构为：
 
-### 6.1 调用特性
+```json
+{
+  "role_routes": {
+    "sample-workflow/reviewer": {
+      "role": "sample-workflow/reviewer",
+      "primary": {
+        "role": "sample-workflow/reviewer",
+        "adapter": "cursor",
+        "profile_id": "cursor-readonly",
+        "model": "your-registered-cursor-model",
+        "reasoning": "high",
+        "permission": "read-only",
+        "workspace": "E:\\projects\\sample-project",
+        "mcp_allowlist": []
+      }
+    }
+  },
+  "adapter_profiles": {
+    "cursor-readonly": {
+      "id": "cursor-readonly",
+      "adapter": "cursor",
+      "executable": "cursor-agent.exe",
+      "trust": "authorized",
+      "mode": "plan",
+      "profile_hash": "<agent-workflow-bridge --hash-profile 生成的 sha256>"
+    }
+  }
+}
+```
+
+Claude 通常配置 `trust=authorized`，需要 MCP 时使用经过验证的 `mcp_config_path`；Codex CLI 使用 `sandbox=read-only`、`approval=untrusted`，custom Provider 的非敏感 route 可放在 `provider_ref/provider_base_url/provider_wire_api/provider_auth/environment_ref`，凭据本身仍留在宿主环境。profile JSON 可以从 policy 拆成独立文件传给 bridge，但内容与 hash 必须相同。
+
+## 6. Role-first 运行闭环
+
+### 6.1 创建冻结 run
+
+先执行第 2.2 节的 enable/status，再调用：
+
+```powershell
+$Run = & $Collaboration `
+  --collaboration-file $InstalledCollaboration `
+  --roles-manifest $InstalledRoles `
+  --workspace $ConsumerRoot `
+  --objective '只读评审当前修改并生成规定 artifact' `
+  --state-dir $StateDir `
+  --coordination-dir $CoordinationDir `
+  --policy-file $PolicyFile | ConvertFrom-Json
+```
+
+`$InstalledCollaboration` 和 `$InstalledRoles` 分别指向消费仓库 `.agents\skills\<business-skill>\collaboration.yaml` 与 `.agents\roles\<role-package>\roles.yaml`。只在 `$Run.effective_mode -eq 'framework'` 时读取 `$Run.run.run` 和 `$Run.run.instances`。`direct` 不会创建 Gateway run；`single` 只报告当前 Agent 执行。不要用请求的 `count` 伪造实际实例数。
+
+> JSON 层级说明：外层 `$Run.run` 是 Router 的 `run` 字段，内层 `.run` 是 Gateway 返回的 `CollaborationRun`，因此 run ID 路径为 `$Run.run.run.run_id`；instances 路径为 `$Run.run.instances`。
+
+### 6.2 准备 ready instance 与 Attempt
+
+Role-first 后续 Gateway 调用必须同时携带 coordination root 和已安装 Role manifest：
+
+```powershell
+function Invoke-CollaborationGateway {
+    param([hashtable]$Request)
+    $raw = ($Request | ConvertTo-Json -Depth 20 -Compress) | & $Core --gateway `
+      --state-dir $StateDir --policy-file $PolicyFile `
+      --roles-manifest $InstalledRoles --coordination-dir $CoordinationDir
+    if ($LASTEXITCODE -ne 0) { throw "core process failed: $LASTEXITCODE" }
+    $response = $raw | ConvertFrom-Json
+    if (-not $response.ok) { throw "$($response.error.code): $($response.error.message)" }
+    return $response.payload
+}
+```
+
+对返回状态为 `ready` 的每个 instance，调用 `prepareCollaborationInstance`，传入 exact `run_id`、`instance_id`、`gate_epoch` 和业务交付合同；它会从 machine-local route 解析 binding、验证 Role Prompt hash，并创建/复用对应 node：
+
+```powershell
+$Prepared = Invoke-CollaborationGateway @{
+  protocol_version = 1; request_id = '<new-request-id>'
+  operation = 'prepareCollaborationInstance'
+  payload = @{
+    run_id = $Run.run.run.run_id
+    instance_id = '<ready-instance-id>'
+    gate_epoch = $Run.run.run.gate_epoch
+    kind = 'role-first-review'
+    expected_output = @{
+      format = 'markdown'; artifact_path = '<absolute-path-inside-workspace>'
+      required = $true; min_bytes = 200
+      required_sections = @('# Review', '## Findings', '## Verdict')
+    }
+  }
+}
+if ($Prepared.preflight.status -ne 'passed') { throw $Prepared.preflight.code }
+```
+
+若 `$Prepared.binding.adapter` 是 `cursor`、`claude` 或 `codexcli`，必须先把 `$Prepared.binding` 写成 `$BindingFile`，并使用与该 binding 的 `profile_id` 对应、已经 `--hash-profile` 固定的 `$ProfileFile` 做 Adapter capability preflight：
+
+```powershell
+$Prepared.binding | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM $BindingFile
+$AdapterCheck = & $Bridge --preflight `
+  --binding-file $BindingFile --profile-file $ProfileFile | ConvertFrom-Json
+if ($AdapterCheck.status -ne 'passed') { throw $AdapterCheck.code }
+```
+
+Codex App Native 不经过 CLI bridge，但 Controller 仍必须按宿主合同确认当前 Native capability、workspace 和只读权限。selected host/Adapter preflight 通过后，才能调用 `prepareAttempt` 签发第一个 HostAction：
+
+```powershell
+$Launch = Invoke-CollaborationGateway @{
+  protocol_version = 1; request_id = '<new-request-id>'
+  operation = 'prepareAttempt'
+  payload = @{
+    node_id = $Prepared.node.node_id
+    controller_instance_id = $ControllerId
+    collaboration_run_id = $Run.run.run.run_id
+    instance_run_id = $Prepared.instance.instance_id
+    gate_epoch = $Run.run.run.gate_epoch
+    role_prompt_hash = $Prepared.role_definition.prompt_hash
+  }
+}
+$AttemptId = $Launch.attempt.attempt_id
+```
+
+不要在此重新提供 Adapter/model 或手写 dispatch Prompt；Gateway 会由冻结 Role Prompt、step task、上游 output refs 和 output requirements 生成并签发。
+
+### 6.3 执行 Native 或 external CLI action
+
+Codex App Native 只执行 core-signed pending action，并用 App 原生 subagent 回填真实 handle/session/identity/canary。三个 external CLI 必须已经在第 6.2 节、`prepareAttempt` 之前完成 preflight；此处只执行 core-signed pending action：
+
+```powershell
+& $Bridge --execute `
+  --core $Core --state-dir $StateDir --policy-file $PolicyFile `
+  --roles-manifest $InstalledRoles --coordination-dir $CoordinationDir `
+  --bridge-state-dir $BridgeStateDir --profile-file $ProfileFile `
+  --attempt-id $AttemptId --controller-instance-id $ControllerId `
+  --action-kind launch
+```
+
+若结果非 terminal，继续用新的 bridge 进程执行 `--action-kind observe`；需要取消时使用 `--cancel --reason <reason>`。bridge 会自行从 core 拉取唯一 pending action、提交结构化结果并复用 detached owner；只有存在多个匹配 pending action 时才显式传 `--action-id`。不要直接 shell 调 Provider CLI，也不要自行构造 `HostActionResult`。
+
+### 6.4 Completion 与 technical release
+
+terminal evidence 到齐后，`requestCompletion` 必须同时传 `attempt_id`、`collaboration_run_id`、`instance_run_id` 和 frozen `gate_epoch`：
+
+```powershell
+$Completion = Invoke-CollaborationGateway @{
+  protocol_version = 1; request_id = '<new-request-id>'
+  operation = 'requestCompletion'
+  payload = @{
+    attempt_id = $AttemptId
+    collaboration_run_id = $Run.run.run.run_id
+    instance_run_id = $Prepared.instance.instance_id
+    gate_epoch = $Run.run.run.gate_epoch
+  }
+}
+if ($Completion.completion.status -ne 'completed') { throw $Completion.completion.reason }
+
+$Release = Invoke-CollaborationGateway @{
+  protocol_version = 1; request_id = '<new-request-id>'
+  operation = 'recordCollaborationTechnicalRelease'
+  payload = @{
+    run_id = $Run.run.run.run_id
+    instance_id = $Prepared.instance.instance_id
+    reason = 'validated framework completion'
+  }
+}
+```
+
+返回的 `next_ready` 是唯一可继续准备的下游 instances。technical release 不创建 `HumanDecision`、不伪造 `user-input:`，也不代表业务审批；failed completion、`delivery_missing`、contamination、cancel 风险或 outcome unknown 都必须停止自动推进。
+
+## 7. Legacy Gateway 高级参考
+
+以下完整 binding/Gateway loop 用于兼容没有 `collaboration.yaml` 的 legacy 接入、排障或开发底层 Controller；普通业务接入优先使用第 6 节 Role-first 路径。
+
+### 7.1 调用特性
 
 `agent-workflow-core --gateway` 每次只从 stdin 读取一个 protocol v1 request，输出一个 response 后退出。每个步骤都使用：
 
@@ -237,7 +471,7 @@ function Invoke-TaskGateway {
 
 如果必须使用 Windows PowerShell 5.1，优先把 request 保存为无 BOM UTF-8 文件再输入；不要依赖系统默认编码传递包含非 ASCII 字符的 JSON。
 
-### 6.2 创建 Task
+### 7.2 创建 Task
 
 ```powershell
 $created = Invoke-TaskGateway @{
@@ -255,7 +489,7 @@ $TaskId = $created.task.task_id
 $RevisionId = $created.revision.revision_id
 ```
 
-### 6.3 提议明确节点和交付物
+### 7.3 提议明确节点和交付物
 
 required artifact 必须是 Task workspace 内的绝对路径：
 
@@ -284,7 +518,7 @@ $NodeId = $proposed.node.node_id
 
 不要使用空 `kind`；空节点会被永久标为 `unspecified_node` 并 fail closed。
 
-### 6.4 运行 core policy preflight
+### 7.4 运行 core policy preflight
 
 ```powershell
 $binding = @{
@@ -310,7 +544,7 @@ $preflight = Invoke-TaskGateway @{
 
 只有 `preflight.status=passed` 才继续。外部 CLI 路径还必须运行 Adapter 自己的 version/model/trust/MCP capability preflight；core policy pass 不代表 Provider CLI 一定可启动。
 
-### 6.5 准备 Attempt
+### 7.5 准备 Attempt
 
 ```powershell
 $ControllerId = 'sample-controller-001'
@@ -330,7 +564,7 @@ $AttemptId = $launch.attempt.attempt_id
 
 把 response 中的 `dispatch_prompt` 原样展示给用户。不要在 Attempt 创建后替换 role、Adapter、model 或 Reasoning。
 
-### 6.6 Poll 并执行 core-signed action
+### 7.6 Poll 并执行 core-signed action
 
 ```powershell
 $batch = Invoke-TaskGateway @{
@@ -347,7 +581,7 @@ $batch = Invoke-TaskGateway @{
 
 #### Native 路径
 
-Controller 必须从消费仓库加载 `.agents/skills/multi-agent-orchestration/SKILL.md`，并在第一个 Gateway request 前让安装器以 `-Check` 核验 receipt；该副本的上游合同见 [`skills/multi-agent-orchestration/SKILL.md`](../../skills/multi-agent-orchestration/SKILL.md) 和 [`native-action-contract.md`](../../skills/multi-agent-orchestration/references/native-action-contract.md)。没有 pending core action 时禁止启动 subagent。
+Controller 必须从消费仓库加载 `.agents/skills/multi-agent-orchestration/SKILL.md`，由 managed entry 在路由前以 `-Check` 核验 receipt，并仅调用 receipt 中三个 absolute paths；PATH 或全局旧 binary 不是 fallback。该副本的上游合同见 [`skills/multi-agent-orchestration/SKILL.md`](../../skills/multi-agent-orchestration/SKILL.md)、[`invoke_business_skill.ps1`](../../skills/multi-agent-orchestration/invoke_business_skill.ps1) 和 [`native-action-contract.md`](../../skills/multi-agent-orchestration/references/native-action-contract.md)。没有 pending core action 时禁止启动 subagent。
 
 Gateway v1 公开 HostAction 只有：
 
@@ -394,7 +628,7 @@ Gateway v1 公开 HostAction 只有：
 
 Gateway 可能返回后续 `observe` action；继续 poll/execute/submit，直到 terminal。不要自行循环调用 Provider。
 
-### 6.7 请求 Completion
+### 7.7 请求 Completion
 
 Agent 已把 artifact 写到 canonical path 且 terminal result 已提交后：
 
@@ -420,7 +654,7 @@ $completion = Invoke-TaskGateway @{
 
 每个 Attempt 的 completion checkpoint 只记录一次。无论第一次结果是 completed 还是 `delivery_missing`，使用新 request ID 再次调用 `requestCompletion` 都会返回 `completion_already_recorded`；相同 request ID 的网络重放仍由 request journal 返回原 outcome。不得在 checkpoint 后本地补 artifact 并重算同一 Attempt。
 
-### 6.8 记录人工决定
+### 7.8 记录人工决定
 
 ```powershell
 $approved = Invoke-TaskGateway @{
@@ -448,15 +682,16 @@ $approved = Invoke-TaskGateway @{
 
 普通成功 `approve` 如果错误携带成功 Attempt ID，会按 fallback approval 解释并返回 `invalid_fallback_approval`；不得通过删改 core 校验来适配旧示例。
 
-## 7. 项目侧应该落盘什么
+## 8. 项目侧应该落盘什么
 
 建议具体项目至少增加一份项目内 Workflow 说明，内容包括：
 
 ```text
 目标与适用任务
 节点名称和顺序
-每个节点的 role / Adapter / model / Reasoning / permission
-Prompt 模板或输入来源
+每个步骤的 role / task / count / after
+Role Package 与完整 Prompt 模板
+本机 route/profile 的配置责任（不写入共享业务 Skill）
 artifact 绝对路径生成规则
 required sections / min bytes
 人工检查点负责人
@@ -467,7 +702,7 @@ toolkit 固定版本
 
 不要把 domain-specific prompt 或验收规则加入 `agent-workflow-toolkit`；它们应跟随具体项目版本化。
 
-## 8. 失败处理速查
+## 9. 失败处理速查
 
 | 现象/错误 | 含义 | 正确处理 |
 | --- | --- | --- |
@@ -487,7 +722,7 @@ toolkit 固定版本
 | `checkpoint_required` | 节点正在等待人工决定 | 先调用 `recordHumanDecision` |
 | Codex CLI 401 | 隔离调用忽略用户 config，缺 custom provider route | 显式配置非敏感 route；凭据仍留在宿主环境 |
 
-## 9. 验证与验收
+## 10. 验证与验收
 
 ### toolkit 升级前
 
@@ -506,38 +741,40 @@ Windows `go test -race` 需要额外 CGO/C 编译器工具链；当前项目不�
 
 至少完成：
 
-1. clean pinned checkout 构建，`--version`/`go version -m` 的 revision 与 commit 一致且 `dirty=false`；
-2. Controller Skill 安装 receipt 创建、`-Check` 通过，并在新 Codex 任务中确认从消费仓库发现；
-3. `--validate-request` 返回 `envelope_valid`，再用临时 version-specific state-dir 跑公共 CLI happy path；
-4. 目标 workspace 的 core preflight，含非空且相等的 node/binding role；
-5. 所选 Native/Adapter 的真实只读 smoke；
-6. artifact hash、required sections 和普通人工 `approve`（不携带 `attempt_id`）通过；
-7. `delivery_missing` 到 `request_revision`、`state_dir_busy` 和相同 request ID 并发/重放行为符合本指南；
-8. host/Adapter runner `finally` cleanup 后无孤儿进程，仓库无 secret/runtime 文件；
-9. 一次独立 reviewer 对实际 diff、公共入口、测试、receipt 和边界的检查。
+1. clean pinned checkout 构建三个公开 binary，三者 `--version` 的 version/protocol/maturity/revision/dirty 一致，且 revision 与 commit 一致、`dirty=false`；
+2. Role-first installer 安装业务 Skill、Role Package 和 Controller，canonical 与 role-first 两份 receipt 的 `-Check` 均通过，并在新宿主任务中确认发现；
+3. machine gate/workspace mode 的 enable→status→direct/single→framework 与一键 disable 返回符合预期；
+4. Role-first route 在 `direct` 不创建 run、`single` 不 spawn、`framework` 才按 `count` 创建 distinct instances；
+5. Role Registry/Prompt hash、machine-local role route、binding 和 external profile hash 均通过 fail-closed 校验；
+6. 所选 Native/Adapter 的真实只读 smoke；external CLI 还要覆盖 public bridge launch→跨进程 observe→completion→technical release→cleanup；
+7. technical release 只推进满足依赖的 `next_ready`，且没有创建 `HumanDecision`、`user-input:` 或业务批准；
+8. failed completion、`delivery_missing`、contamination、outcome unknown 和 cancel 风险拒绝 technical release；
+9. disable 后无新 admission，已有 Attempt 的取消/未知状态与 active-run evidence 一致；仓库无 orphan、secret 或 runtime 文件；
+10. 一次独立 reviewer 对实际 diff、公开入口、测试、receipts、指南与原始 Role-first 目标的检查。
 
 toolkit 的普通测试已经把这条公开路径固化在 [`cmd/agent-workflow-core/adoption_test.go`](../../cmd/agent-workflow-core/adoption_test.go)：它覆盖 version/envelope、完整 create→propose→preflight→attempt→action→completion→approve、`delivery_missing` revision、8 进程同 request 串行、structured busy error 和 clean consumer Skill 安装/检查。真实 Provider smoke 仍保持 opt-in，不由 fixture 冒充。
 
-本指南对应的完整自动化、真实 Codex App Native smoke 和 Cursor 独立 closure 见 [`AWT-adoption-hardening.md`](../../tests/orchestration/evidence/2026-08-11/AWT-adoption-hardening.md)。
+legacy adoption hardening 见 [`AWT-adoption-hardening.md`](../../tests/orchestration/evidence/2026-08-11/AWT-adoption-hardening.md)；最新 Role-first clean-consumer、三 CLI public bridge handoff、Codex App Native smoke、technical-release 拒绝矩阵和独立 closure 见 [`role-first-implementation-smoke.md`](../../tests/orchestration/evidence/2026-08-13/role-first-implementation-smoke.md)。
 
 ### 项目上线边界
 
 当前只应标记为“项目内受控试用”。如果真实项目实践产生通用缺陷，把最小复现和脱敏证据带回 toolkit；业务特有规则留在项目仓库。Wave 5、写入能力或生产化需要另行设计与批准，不因一次成功试用自动获得授权。
 
-## 10. 当前最小落地路径
+## 11. 当前最小落地路径
 
 如果目标是尽快在一个具体项目试用，推荐顺序是：
 
 ```text
-固定 toolkit 版本
-  → 构建 agent-workflow-core
-  → 安装并核验消费仓库 Controller Skill
-  → version-specific 项目外 state-dir + strict 本机 policy
-  → 只读 reviewer Node + Markdown artifact
-  → Codex App Native Controller
-  → completion evidence
-  → 普通人工 approve（无 attempt_id）
+固定 toolkit 版本并在 checkout 外构建 core/collaboration/bridge
+  → 安装并核验业务 Skill + Role Package + Controller receipts
+  → version-specific state-dir + coordination root + strict 本机 role route/profile
+  → 显式 enable machine gate，并把 workspace 设为 framework
+  → 调用业务 Skill；agent-workflow-collaboration 创建冻结 run/ready instances
+  → prepareCollaborationInstance + prepareAttempt
+  → Codex App Native 或 external CLI public bridge
+  → completion evidence + technical release + next_ready
+  → DAG 完成后由业务 Workflow 执行真实人工验收
   → 保存项目侧试用记录
 ```
 
-这条路径不要求继续开发 Wave 5，也不要求先实现统一外部 Adapter executor。需要 Cursor/Claude/Codex CLI 自动桥接时，再把 executor command 作为独立通用能力推进。
+这条路径不要求继续开发 Wave 5。Codex App Native 使用宿主原生能力；Cursor/Claude/Codex CLI 的统一 public bridge 已实现并验收，不再由下游自行组合 Provider shell。

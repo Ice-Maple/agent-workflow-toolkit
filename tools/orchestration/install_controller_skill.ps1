@@ -9,6 +9,12 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$CorePath,
 
+    [Parameter(Mandatory = $true)]
+    [string]$CollaborationPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$BridgePath,
+
     [ValidateSet('Copy', 'SymbolicLink')]
     [string]$Mode = 'Copy',
 
@@ -65,16 +71,17 @@ function Get-GitState {
     }
 }
 
-function Get-CoreVersion {
-    param([string]$Path)
+function Get-BinaryVersion {
+    param([string]$Path, [string]$CommandName)
 
     $output = @(& $Path --version 2>&1)
     if ($LASTEXITCODE -ne 0) {
-        throw "cannot execute core --version: $($output -join [Environment]::NewLine)"
+        throw "cannot execute $CommandName --version: $($output -join [Environment]::NewLine)"
     }
     $text = ($output -join ' ').Trim()
-    if ($text -notmatch '^agent-workflow-core version=(\S+) protocol=(\d+) maturity=(\S+) revision=([0-9a-fA-F]{40}|unknown) dirty=(true|false)$') {
-        throw "unsupported core --version output: $text"
+    $expected = '^' + [regex]::Escape($CommandName) + ' version=(\S+) protocol=(\d+) maturity=(\S+) revision=([0-9a-fA-F]{40}|unknown) dirty=(true|false)$'
+    if ($text -notmatch $expected) {
+        throw "unsupported $CommandName --version output: $text"
     }
     return [pscustomobject]@{
         Text = $text
@@ -97,6 +104,11 @@ function Assert-Equal {
 $toolkit = Resolve-ExistingPath $ToolkitRoot 'ToolkitRoot'
 $consumer = Resolve-ExistingPath $ConsumerRoot 'ConsumerRoot'
 $core = Resolve-ExistingPath $CorePath 'CorePath'
+$collaboration = Resolve-ExistingPath $CollaborationPath 'CollaborationPath'
+$bridge = Resolve-ExistingPath $BridgePath 'BridgePath'
+foreach ($binaryPath in @($core, $collaboration, $bridge)) {
+    if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) { throw "binary path is not a file: $binaryPath" }
+}
 $skillSource = Resolve-ExistingPath (Join-Path $toolkit 'skills\multi-agent-orchestration') 'Controller Skill source'
 if (-not (Test-Path -LiteralPath (Join-Path $skillSource 'SKILL.md') -PathType Leaf)) {
     throw "Controller Skill source is missing SKILL.md: $skillSource"
@@ -112,14 +124,29 @@ $skillsRoot = Join-Path $agentsRoot 'skills'
 $skillTarget = Join-Path $skillsRoot 'multi-agent-orchestration'
 $lockPath = Join-Path $agentsRoot 'agent-workflow-toolkit.lock.json'
 $sourceHash = Get-TreeHash $skillSource
-$coreHash = (Get-FileHash -LiteralPath $core -Algorithm SHA256).Hash.ToLowerInvariant()
-$coreVersion = Get-CoreVersion $core
-if ($coreVersion.Revision -eq 'unknown') {
-    throw 'core build does not expose a VCS revision; rebuild it from the pinned toolkit checkout with Go VCS metadata enabled'
+$binaries = [ordered]@{
+    core = [pscustomobject]@{ Path = $core; Command = 'agent-workflow-core' }
+    collaboration = [pscustomobject]@{ Path = $collaboration; Command = 'agent-workflow-collaboration' }
+    bridge = [pscustomobject]@{ Path = $bridge; Command = 'agent-workflow-bridge' }
 }
-Assert-Equal $coreVersion.Revision $gitState.Commit 'core revision'
-if ($coreVersion.Dirty -ne $gitState.Dirty) {
-    throw "core/toolkit dirty state mismatch: core=$($coreVersion.Dirty) toolkit=$($gitState.Dirty); rebuild the core from the current checkout"
+foreach ($name in @($binaries.Keys)) {
+    $entry = $binaries[$name]
+    $entry | Add-Member -NotePropertyName Hash -NotePropertyValue ((Get-FileHash -LiteralPath $entry.Path -Algorithm SHA256).Hash.ToLowerInvariant())
+    $entry | Add-Member -NotePropertyName Version -NotePropertyValue (Get-BinaryVersion $entry.Path $entry.Command)
+    if ($entry.Version.Revision -eq 'unknown') {
+        throw "$($entry.Command) does not expose a VCS revision; rebuild all binaries from the pinned toolkit checkout with Go VCS metadata enabled"
+    }
+    Assert-Equal $entry.Version.Revision $gitState.Commit "$name revision"
+    if ($entry.Version.Dirty -ne $gitState.Dirty) {
+        throw "$name/toolkit dirty state mismatch: binary=$($entry.Version.Dirty) toolkit=$($gitState.Dirty); rebuild all binaries from the current checkout"
+    }
+}
+$reference = $binaries.core.Version
+foreach ($name in @('collaboration', 'bridge')) {
+    $candidate = $binaries[$name].Version
+    Assert-Equal $candidate.Version $reference.Version "$name version"
+    if ($candidate.Protocol -ne $reference.Protocol) { throw "$name protocol mismatch" }
+    Assert-Equal $candidate.Maturity $reference.Maturity "$name maturity"
 }
 
 if ($Check) {
@@ -130,21 +157,24 @@ if ($Check) {
         throw "installed Controller Skill is missing: $skillTarget"
     }
     $receipt = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
-    if ($receipt.schema_version -ne 1) {
+    if ($receipt.schema_version -ne 2) {
         throw "unsupported installation receipt schema: $($receipt.schema_version)"
     }
     Assert-Equal ([string]$receipt.toolkit_root) $toolkit 'toolkit_root'
     Assert-Equal ([string]$receipt.toolkit_commit) $gitState.Commit 'toolkit_commit'
-    Assert-Equal ([string]$receipt.core_path) $core 'core_path'
-    Assert-Equal ([string]$receipt.core_sha256) $coreHash 'core_sha256'
-    Assert-Equal ([string]$receipt.core_version_output) $coreVersion.Text 'core_version_output'
-    Assert-Equal ([string]$receipt.core_revision) $coreVersion.Revision 'core_revision'
-    if ([int]$receipt.core_protocol -ne $coreVersion.Protocol) {
-        throw "core_protocol mismatch: actual=$($coreVersion.Protocol) expected=$($receipt.core_protocol)"
-    }
-    Assert-Equal ([string]$receipt.core_maturity) $coreVersion.Maturity 'core_maturity'
-    if ([bool]$receipt.core_dirty -ne $coreVersion.Dirty) {
-        throw "core_dirty mismatch: actual=$($coreVersion.Dirty) expected=$($receipt.core_dirty)"
+    if ([bool]$receipt.toolkit_dirty -ne $gitState.Dirty) { throw 'toolkit_dirty mismatch' }
+    foreach ($name in @($binaries.Keys)) {
+        $entry = $binaries[$name]
+        $record = $receipt.binaries.$name
+        if ($null -eq $record) { throw "receipt binary record is missing: $name" }
+        Assert-Equal ([string]$record.path) $entry.Path "$name path"
+        Assert-Equal ([string]$record.sha256) $entry.Hash "$name sha256"
+        Assert-Equal ([string]$record.version_output) $entry.Version.Text "$name version_output"
+        Assert-Equal ([string]$record.version) $entry.Version.Version "$name version"
+        Assert-Equal ([string]$record.revision) $entry.Version.Revision "$name revision"
+        if ([int]$record.protocol -ne $entry.Version.Protocol) { throw "$name protocol mismatch" }
+        Assert-Equal ([string]$record.maturity) $entry.Version.Maturity "$name maturity"
+        if ([bool]$record.dirty -ne $entry.Version.Dirty) { throw "$name dirty mismatch" }
     }
     Assert-Equal ([string]$receipt.skill_source) $skillSource 'skill_source'
     Assert-Equal ([string]$receipt.skill_source_sha256) $sourceHash 'skill_source_sha256'
@@ -154,8 +184,7 @@ if ($Check) {
     [pscustomobject]@{
         status = 'valid'
         toolkit_commit = $gitState.Commit
-        core_sha256 = $coreHash
-        core_revision = $coreVersion.Revision
+        binary_revision = $reference.Revision
         skill_sha256 = $sourceHash
         skill_target = $skillTarget
     } | ConvertTo-Json -Depth 4
@@ -179,18 +208,26 @@ else {
 
 $installedHash = Get-TreeHash $skillTarget
 Assert-Equal $installedHash $sourceHash 'installed skill hash'
+$binaryReceipt = [ordered]@{}
+foreach ($name in @($binaries.Keys)) {
+    $entry = $binaries[$name]
+    $binaryReceipt[$name] = [ordered]@{
+        path = $entry.Path
+        sha256 = $entry.Hash
+        version_output = $entry.Version.Text
+        version = $entry.Version.Version
+        protocol = $entry.Version.Protocol
+        maturity = $entry.Version.Maturity
+        revision = $entry.Version.Revision
+        dirty = [bool]$entry.Version.Dirty
+    }
+}
 $receipt = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     toolkit_root = $toolkit
     toolkit_commit = $gitState.Commit
     toolkit_dirty = [bool]$gitState.Dirty
-    core_path = $core
-    core_sha256 = $coreHash
-    core_version_output = $coreVersion.Text
-    core_revision = $coreVersion.Revision
-    core_dirty = [bool]$coreVersion.Dirty
-    core_protocol = $coreVersion.Protocol
-    core_maturity = $coreVersion.Maturity
+    binaries = $binaryReceipt
     skill_source = $skillSource
     skill_source_sha256 = $sourceHash
     skill_target = [System.IO.Path]::GetFullPath($skillTarget)
@@ -212,8 +249,7 @@ finally {
 [pscustomobject]@{
     status = 'installed'
     toolkit_commit = $gitState.Commit
-    core_sha256 = $coreHash
-    core_revision = $coreVersion.Revision
+    binary_revision = $reference.Revision
     skill_sha256 = $sourceHash
     skill_target = $skillTarget
     receipt = $lockPath

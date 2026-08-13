@@ -11,16 +11,18 @@ This Skill is the framework Router/Controller. A user normally calls the busines
 
 When the active business Skill has `collaboration.yaml`:
 
-1. Validate the installed framework receipt and the business Skill/Role receipt. Never search for a different Role definition after admission.
-2. Call `agent-workflow-collaboration` with the sidecar, `roles.yaml`, canonical workspace and machine-local coordination root. The sidecar may contain only `role_dependencies` and steps with `id`, `role`, `task`, `count`, and `after`.
-3. Honor the returned `effective_mode`:
+1. During the host's normal Skill-dispatch decision, treat `.agents/agent-workflow-role-first-entry.json` as the single managed trigger registry. When the selected business Skill is registered, resolve it there and invoke `invoke_business_skill.ps1`; do not require the user or the business Skill to repeat orchestration logic or explicitly name this Controller. This is a managed host-policy contract discovered at task start, not an OS-level hook that can intercept a host which did not discover the installed Controller.
+2. The entry validates `.agents/agent-workflow-toolkit.lock.json` schema v2 and the business Skill/Role receipt, then calls the exact canonical absolute paths in `binaries.core.path`, `binaries.collaboration.path`, and `binaries.bridge.path`. Never use PATH, a global binary, or another checkout as fallback.
+3. If the registry is absent, execute the original business Skill body unchanged (`zero_install`). If installed, honor the entry's directive: `ordinary_delegation` for `direct`, `execute_sequentially` with no spawn/Gateway for `single`, and `framework_controller` only for `framework`.
+4. The collaboration sidecar may contain only `role_dependencies` and steps with `id`, `role`, `task`, `count`, and `after`.
+5. Honor the returned `effective_mode`:
    - `framework`: use the returned frozen run/instances and continue through TaskGateway;
    - `direct`: return control to the host's ordinary delegation path and report that independent instance count is not guaranteed;
    - `single`: do not spawn or call Gateway; the current Agent executes sequentially.
-4. In framework mode, call `prepareCollaborationInstance` only for returned ready instances, run the selected host preflight, then call `prepareAttempt` with the exact `run_id`, `instance_id`, binding, and gate epoch. Never let the business Skill supply Adapter/model/Gateway fields.
-5. For Codex App Native, execute the core-signed action with the App's native capability. For `claude`, `cursor`, or `codexcli`, call `agent-workflow-bridge --execute`; never compose Provider shell commands in the business repository.
-6. After validated completion, call `recordCollaborationTechnicalRelease`. This may advance only the frozen DAG. It must not create `HumanDecision`, `user-input:*`, `goal:*`, or business approval.
-7. If technical release is rejected, or admission, contamination, outcome-unknown, cancellation, retry/fallback, or `delivery_missing` occurs, stop at the real checkpoint and surface it to the user.
+6. In framework mode, call `prepareCollaborationInstance` only for returned ready instances, run the selected host preflight, then call `prepareAttempt` with the exact `run_id`, `instance_id`, binding, and gate epoch. Never let the business Skill supply Adapter/model/Gateway fields.
+7. For Codex App Native, execute the core-signed action with the App's native capability. For `claude`, `cursor`, or `codexcli`, call the receipt-pinned bridge `--execute`; never compose Provider shell commands in the business repository.
+8. After validated completion, call `recordCollaborationTechnicalRelease`. This may advance only the frozen DAG. It must not create `HumanDecision`, `user-input:*`, `goal:*`, or business approval.
+9. Once framework admission is selected, any role/route/preflight/permission/workspace/MCP, technical-release, contamination, outcome-unknown, cancellation, retry/fallback, or `delivery_missing` error is fail closed. Never retry by switching to `direct`.
 
 ## Non-negotiable boundaries
 
@@ -30,7 +32,7 @@ When the active business Skill has `collaboration.yaml`:
 4. Codex App Native uses the App's native subagent capability. Do not shell-launch `codex`, `codex.exe`, or another CLI to simulate the Native path.
 5. Do not use `--force`, `--yolo`, hidden approval, automatic Goal authority, or an unregistered binding to bypass a checkpoint.
 6. If the selected host capability is unavailable, report `unsupported` or `degraded` through the core path. Any route fallback must be selected by machine-local policy; do not silently switch Adapter after Attempt admission.
-7. In a consumer repository, require a valid `.agents/agent-workflow-toolkit.lock.json` produced by `tools/orchestration/install_controller_skill.ps1`; run its `-Check` mode before the first Gateway request. Do not silently use another global or copied Skill.
+7. In a consumer repository, require a valid schema-v2 `.agents/agent-workflow-toolkit.lock.json` produced by `tools/orchestration/install_controller_skill.ps1`; the managed entry runs its `-Check` mode before routing. Do not silently use PATH or another global/copied binary or Skill.
 8. Treat the node role as admission data. The proposed node role and binding role must be the same non-empty configurable string.
 
 ## Advanced Gateway loop

@@ -1,7 +1,7 @@
 # Role-first 可选协作入口优化设计
 
 - 日期：2026-08-12
-- 状态：已确认方向，已按下游评审修订，方案未实施
+- 状态：已确认方向并实施；U0–U3 与最小发布收口证据见 `tests/orchestration/evidence/2026-08-13/role-first-implementation-smoke.md`
 - 面向范围：`agent-workflow-toolkit` 的通用协作入口、Router、Controller、Role Prompt、调度、policy、CLI 与分发合同
 - 兼容基线：现有 TaskGateway、Codex App Native 宿主路径，以及 Claude Code、Cursor Agent、Codex CLI 三个 external CLI Adapter
 - 不包含：具体业务 Prompt 内容、业务 artifact 内容、业务审批规则以及任何具体业务仓库的 Workflow 改造实现
@@ -71,7 +71,7 @@ Wave 2–4 因而完成并验证了 Gateway 状态、安全、恢复、Codex App
 
 先前接入评审验证的是“指南与当前实现一致”，没有反向验证“当前实现覆盖原始 role-first 产品目标”。因此此前的“功能完成”应修正为：
 
-> Adapter 与 TaskGateway 底层执行、安全和恢复合同已经完成；原始设计中的 role-first 普通消费入口尚未完成。
+> 当时的判断是：Adapter 与 TaskGateway 底层执行、安全和恢复合同已经完成；原始设计中的 role-first 普通消费入口尚未完成。该缺口现已由本文 U0–U3 的实现闭合，当前状态见文末。
 
 本设计用于补回该缺口。U0–U3 是同一上层 capability 的完整实现范围，不按 Native 或 external Adapter 重新切分。
 
@@ -367,7 +367,7 @@ Role ID
 - **Codex App Native 宿主路径**：由 Controller Skill 调用 App 原生 subagent capability；[`internal/adapters/native`](../../internal/adapters/native/native.go) 只承载 Native host contract 和测试用 fake executor，不是与 CLI 包对等的第四个 Adapter；
 - **三个 external CLI Adapter**：Claude Code、Cursor Agent 和 Codex CLI 的底层 Adapter 已在 `internal/adapters/claude`、`cursor`、`codexcli` 实现。
 
-本设计不增加新的 Provider Adapter abstraction、不重写 Adapter lifecycle，也不按执行后端拆分 U0–U3。但“内部 Adapter 已实现”不等于消费仓库已经有公开调用入口：现有[接入指南](../guides/multi-agent-orchestration-project-adoption.md)明确记录了 external CLI 尚无统一 executor command。因此 U1 必须增加下面的 toolkit-side bridge，U3 必须分别验证 Native 宿主路径与三个 external CLI Adapter 的真实 handoff。
+本设计不增加新的 Provider Adapter abstraction、不重写 Adapter lifecycle，也不按执行后端拆分 U0–U3。设计时“内部 Adapter 已实现”并不等于消费仓库已有公开调用入口，因此 U1 要求增加下面的 toolkit-side bridge，U3 要求分别验证 Native 宿主路径与三个 external CLI Adapter 的真实 handoff；这些要求现已实现并验收。
 
 ### 8.4 External CLI Host-Action Bridge
 
@@ -892,4 +892,4 @@ steps:
 3. 实现完成后由独立 reviewer 同时核对原始 role-first 目标、设计、代码、指南和真实消费体验。
 4. 上游形成新的 acceptance commit 后，再选择 `doc-ai-toolkit` 中一个可单独安装的 Skill 做真实接入。
 
-截至 2026-08-13，U0–U3 的核心合同、Role Registry、三态 route/run 创建入口、technical release、external CLI public bridge、依赖闭包安装器、clean-consumer smoke、三 CLI public bridge handoff 和 Codex App Native role-first smoke 已实现并形成证据；最终独立 closure、全量回归和 acceptance commit 仍在收口。因此本文仍是设计基线，完成状态以实现证据和提交为准。
+截至 2026-08-13，U0–U3 的核心合同、Role Registry、三态 route/run 创建入口、technical release、external CLI public bridge、依赖闭包安装器、clean-consumer smoke、三 CLI public bridge handoff和 Codex App Native role-first smoke 已实现并形成证据；最终独立 closure、全量回归和 acceptance commit `f3851c0` 均已完成。本文保留为设计基线，当前能力与使用方式以架构说明、接入指南和实现证据为准。

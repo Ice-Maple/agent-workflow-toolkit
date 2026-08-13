@@ -12,13 +12,9 @@ import (
 	"time"
 
 	"agent-workflow-toolkit/internal/bridge"
+	"agent-workflow-toolkit/internal/buildinfo"
 	"agent-workflow-toolkit/internal/gateway"
 	"agent-workflow-toolkit/internal/orchestration"
-)
-
-const (
-	version  = "0.2.0"
-	maturity = "experimental"
 )
 
 func main() {
@@ -28,6 +24,7 @@ func main() {
 		}
 	}
 	showVersion := flag.Bool("version", false, "print the external bridge version")
+	hashProfileMode := flag.Bool("hash-profile", false, "print a profile with its canonical profile_hash without executing a Provider")
 	preflightMode := flag.Bool("preflight", false, "run Adapter capability preflight from binding/profile files")
 	executeMode := flag.Bool("execute", false, "execute one pending core HostAction through the external bridge")
 	cancelMode := flag.Bool("cancel", false, "request and execute a core-issued cancel_host action")
@@ -49,17 +46,25 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("agent-workflow-bridge version=%s protocol=1 schema=%s maturity=%s\n", version, bridge.BridgeSchema, maturity)
+		fmt.Println(buildinfo.Format("agent-workflow-bridge", 1))
 		return
 	}
 	modes := 0
-	for _, selected := range []bool{*preflightMode, *executeMode, *cancelMode} {
+	for _, selected := range []bool{*hashProfileMode, *preflightMode, *executeMode, *cancelMode} {
 		if selected {
 			modes++
 		}
 	}
 	if modes != 1 {
-		fatal(errors.New("exactly one of --preflight, --execute or --cancel is required"))
+		fatal(errors.New("exactly one of --hash-profile, --preflight, --execute or --cancel is required"))
+	}
+	if *hashProfileMode {
+		profile, err := bridge.HashProfile(*profileFile)
+		if err != nil {
+			fatal(err)
+		}
+		writeJSON(profile)
+		return
 	}
 
 	if *preflightMode {

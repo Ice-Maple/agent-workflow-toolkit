@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 	"strings"
 	"time"
 
 	"agent-workflow-toolkit/internal/bridge"
+	"agent-workflow-toolkit/internal/buildinfo"
 	"agent-workflow-toolkit/internal/collaboration"
 	"agent-workflow-toolkit/internal/coordination"
 	"agent-workflow-toolkit/internal/gateway"
@@ -22,19 +22,6 @@ import (
 	"agent-workflow-toolkit/internal/roles"
 	"agent-workflow-toolkit/internal/storage"
 )
-
-const (
-	version  = "0.2.0"
-	maturity = "experimental"
-)
-
-type versionMetadata struct {
-	Version       string `json:"version"`
-	ProtocolMajor int    `json:"protocol_major"`
-	Maturity      string `json:"maturity"`
-	Revision      string `json:"revision"`
-	Dirty         bool   `json:"dirty"`
-}
 
 func main() {
 	showVersion := flag.Bool("version", false, "print the core version")
@@ -57,8 +44,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		metadata := currentVersionMetadata()
-		fmt.Printf("agent-workflow-core version=%s protocol=%d maturity=%s revision=%s dirty=%t\n", metadata.Version, metadata.ProtocolMajor, metadata.Maturity, metadata.Revision, metadata.Dirty)
+		fmt.Println(buildinfo.Format("agent-workflow-core", protocol.Major))
 		return
 	}
 	if *inspectCollaboration || *inspectRoles {
@@ -568,25 +554,6 @@ func writeGatewayResult(request protocol.Request, payload json.RawMessage, err e
 		os.Exit(1)
 	}
 	writeResponse(response)
-}
-
-func currentVersionMetadata() versionMetadata {
-	metadata := versionMetadata{Version: version, ProtocolMajor: protocol.Major, Maturity: maturity, Revision: "unknown"}
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return metadata
-	}
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case "vcs.revision":
-			if strings.TrimSpace(setting.Value) != "" {
-				metadata.Revision = setting.Value
-			}
-		case "vcs.modified":
-			metadata.Dirty = setting.Value == "true"
-		}
-	}
-	return metadata
 }
 
 func writeSuccess(requestID string, payload any) {

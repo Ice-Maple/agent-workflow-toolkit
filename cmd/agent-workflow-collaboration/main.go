@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-workflow-toolkit/internal/buildinfo"
 	"agent-workflow-toolkit/internal/collaboration"
 	"agent-workflow-toolkit/internal/coordination"
 	"agent-workflow-toolkit/internal/gateway"
@@ -32,6 +33,7 @@ type routeOutput struct {
 }
 
 func main() {
+	showVersion := flag.Bool("version", false, "print the collaboration router version")
 	manifestPath := flag.String("collaboration-file", "", "business Skill collaboration.yaml")
 	rolesManifest := flag.String("roles-manifest", "", "Workflow/project roles.yaml")
 	workspace := flag.String("workspace", "", "canonical business workspace")
@@ -42,6 +44,10 @@ func main() {
 	policyFile := flag.String("policy-file", "", "machine-local role routes and Adapter profiles")
 	lockTimeout := flag.Duration("lock-timeout", 5*time.Second, "maximum coordination lock wait")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(buildinfo.Format("agent-workflow-collaboration", 1))
+		return
+	}
 
 	manifest, err := collaboration.Load(*manifestPath)
 	if err != nil {
