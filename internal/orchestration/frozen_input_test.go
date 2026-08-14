@@ -56,6 +56,19 @@ func TestVerifyFrozenInputsEnforcesDedicatedImmutableRoot(t *testing.T) {
 	})
 }
 
+func TestSameFrozenPathUsesOperatingSystemCaseSemantics(t *testing.T) {
+	left := filepath.Join("root", "Review")
+	right := filepath.Join("root", "review")
+	for _, test := range []struct {
+		goos string
+		want bool
+	}{{goos: "windows", want: true}, {goos: "linux", want: false}, {goos: "darwin", want: false}} {
+		if got := sameFrozenPathForOS(test.goos, left, right); got != test.want {
+			t.Fatalf("sameFrozenPathForOS(%q, %q, %q) = %t, want %t", test.goos, left, right, got, test.want)
+		}
+	}
+}
+
 func writeFrozenInputForTest(t *testing.T, root, name, logicalName, content string) FrozenInputRef {
 	t.Helper()
 	path := filepath.Join(root, name)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -93,9 +94,13 @@ func VerifyFrozenInputs(inputs []FrozenInputRef) ([]FrozenInputRef, error) {
 }
 
 func sameFrozenPath(left, right string) bool {
+	return sameFrozenPathForOS(runtime.GOOS, left, right)
+}
+
+func sameFrozenPathForOS(goos, left, right string) bool {
 	left, right = filepath.Clean(left), filepath.Clean(right)
-	if strings.EqualFold(left, right) {
-		return true
+	if goos == "windows" {
+		return strings.EqualFold(left, right)
 	}
 	return left == right
 }

@@ -38,7 +38,7 @@ PASS
 
 覆盖点：
 
-- 2 秒 deterministic Cursor fixture session delay 下，public bridge 在 1 秒内返回 owner `ready`，不会等待 Provider session；同一 pending launch 再执行一次仍返回同一 owner；
+- 3 秒 deterministic Cursor fixture session delay 下，public bridge 在 2 秒内返回 owner `ready`，不会等待 Provider session；同一 pending launch 再执行一次仍返回同一 owner；
 - Attempt 已是 `running` 时执行真实 core `--disable`，public owner 收到 `cancel_host`，Attempt/owner 终止，disable 返回 `cancelled` 且无 panic；
 - legacy active-run index 只有 top-level `AttemptID`、`Attempts=nil` 时执行 disable，返回 `not_contacted` 且无 panic；
 - fresh consumer 只点名 `sample-workflow/reviewer`，覆盖 zero-install、direct、single、framework、disable、Role Prompt hash、receipt-pinned collaboration binary 与 Prompt tamper fail-closed；

@@ -18,7 +18,7 @@ func main() {
 	switch {
 	case contains(args, "--workspace"):
 		if valueAfter(args, "--model") == "fixture-slow-model" {
-			time.Sleep(2 * time.Second)
+			time.Sleep(3 * time.Second)
 		}
 		fmt.Println(`{"type":"system","subtype":"init","session_id":"cursor-bridge-session"}`)
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"type": "user", "session_id": "cursor-bridge-session", "message": map[string]any{"role": "user", "content": []map[string]string{{"type": "text", "text": valueAfter(args, "--")}}}})

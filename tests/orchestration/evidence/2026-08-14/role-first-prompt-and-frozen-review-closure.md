@@ -44,6 +44,8 @@ Cursor plan read through explicit --add-dir: PASS
 
 上述修复后的最终冻结 diff 为 150203 bytes，SHA-256 `486ef1fedc2ecc02c6875a9f7a1bf58d50bbe45cf20e5705ba396db38bfa5eb6`。实际 `doc-ai-toolkit-development/reviewer` 再次完成 owner ready → repeated launch same owner → observe → completion → technical release → disable，Provider Prompt hash 与 dispatch hash 同为 `d0681b21be9b32de83bbefefdc2aa34c290e495740295f8a7422feca86775647`；normalized final 包含冻结 HEAD，结论为“无开放 P0 / P1 / P2”，最终 verdict `PASS`。
 
+首次从 clean commit `96cfab4` 重放同一冻结 artifact 时，实际 reviewer 返回 `PASS WITH P2`：`sameFrozenPath` 在所有 OS 上使用 `EqualFold`，会在 Linux 等 case-sensitive 文件系统把仅大小写不同的两个目录误判为同一路径。该结果没有作为最终 acceptance。修复后仅 Windows 保留 case-insensitive 比较，Linux/macOS 使用 exact path；定点测试在同一进程覆盖三个 OS 分支。一次资源压力下 slow-owner fixture 也暴露 1 秒断言窗口过紧，fixture 现用 3 秒 Provider delay 与 2 秒 owner-ready 上限保留明确间隔，不改变生产 15 秒 owner-ready 合同。
+
 ## 发布边界
 
 本文件先记录实现 worktree 证据，不预写 acceptance commit。最终 candidate 只能在 clean HEAD 上重新构建并完成 full test/vet/build、Windows/Linux build、PowerShell Parser、Markdown links、installer/receipt/version、真实 Prompt exactness 和 actual reviewer frozen-input E2E 后给出。

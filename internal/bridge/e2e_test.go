@@ -30,6 +30,7 @@ func TestPublicBridgeRoleFirstHandoff(t *testing.T) {
 func TestPublicBridgePublishesOwnerReadyBeforeSlowCursorSession(t *testing.T) {
 	runPublicBridgeRoleFirstHandoffWithOptions(t, ProviderCursor, buildBridgeExecutable(t), buildCoreExecutable(t), roleFirstE2EOptions{
 		providerModel:                    "fixture-slow-model",
+		readyDeadline:                    2 * time.Second,
 		expectReadyBeforeProviderSession: true,
 	})
 }
