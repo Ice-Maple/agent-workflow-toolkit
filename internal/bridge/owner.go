@@ -26,6 +26,7 @@ const (
 	ownerStateDirectory = "owners"
 	ownerPollInterval   = 250 * time.Millisecond
 	ownerHeartbeat      = 5 * time.Second
+	ownerActionTimeout  = 30 * time.Second
 )
 
 type OwnerStore struct {
@@ -258,7 +259,7 @@ func (s *ownerServer) serve(ctx context.Context) error {
 
 func (s *ownerServer) handleConnection(ctx context.Context, connection net.Conn) {
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(10 * time.Second))
+	_ = connection.SetDeadline(time.Now().Add(ownerActionTimeout))
 	var request ownerIPCRequest
 	if err := json.NewDecoder(bufio.NewReader(connection)).Decode(&request); err != nil {
 		_ = json.NewEncoder(connection).Encode(ownerIPCResponse{Error: "invalid owner request"})
@@ -354,7 +355,11 @@ func sendOwnerAction(ctx context.Context, receipt OwnerReceipt, action orchestra
 		return orchestration.HostActionResult{}, errors.New("stale_owner: owner endpoint is unavailable")
 	}
 	defer connection.Close()
-	if err := connection.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+	deadline := time.Now().Add(ownerActionTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := connection.SetDeadline(deadline); err != nil {
 		return orchestration.HostActionResult{}, errors.New("outcome_unknown: owner connection deadline could not be established")
 	}
 	if err := json.NewEncoder(connection).Encode(ownerIPCRequest{SchemaVersion: BridgeSchema, Capability: receipt.Capability, OwnerStartMarker: receipt.OwnerStartMarker, AttemptID: receipt.AttemptID, Operation: "execute", Action: action}); err != nil {

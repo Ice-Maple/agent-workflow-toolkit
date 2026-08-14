@@ -1,8 +1,8 @@
 # Agent Workflow Toolkit
 
-面向 Agent 工作方式、能力扩展和工程实践的通用工具仓库。多 Agent 协同 MVP 的 Wave 0–4 已验收为受控只读 `experimental`；Role-first U0–U3 已实现业务 Skill 与项目 Role 两类 managed entry，但项目接入必须固定到包含真实 Cursor framework 组合回归的新 acceptance commit，不能继续固定已被组合缺陷否决的 `d68a143`。Wave 5 尚未启动。
+面向 Agent 工作方式、能力扩展和工程实践的通用工具仓库。多 Agent 协同 MVP 的 Wave 0–4 已验收为受控只读 `experimental`；Role-first U0–U3 已实现业务 Skill 与项目 Role 两类 managed entry。项目接入必须固定到同时包含 Cursor multiline Prompt exactness、frozen reviewer 与真实 framework 生命周期的新 clean acceptance commit；`d68a143`、`7184bd5`、`c77d397` 均已作废。Wave 5 尚未启动。
 
-Role-first installer 会用 schema-v2 receipt 固定同一 clean revision 的 core、collaboration、bridge 三个 binary，并安装统一 managed entry。正常用户只调用业务 Skill或在项目规则中点名已注册 Role；`zero-install/direct/single/framework` 路由由 Controller 一处承载，不要求业务仓库复制底层编排。
+Role-first installer 会用 schema-v2 receipt 固定同一 clean revision 的 core、collaboration、bridge 三个 binary，并安装统一 managed entry。正常用户只调用业务 Skill或在项目规则中点名已注册 Role；`zero-install/direct/single/framework` 路由由 Controller 一处承载，不要求业务仓库复制底层编排。无 Shell 的 project reviewer 可由 host 生成 frozen Git artifact，再通过 Cursor `ask + read-only` profile 读取；framework 会复核 artifact 与 Provider 实收 Prompt hash。
 
 ## 仓库定位
 

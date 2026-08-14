@@ -7,9 +7,12 @@ package cursor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -25,7 +28,7 @@ const (
 	Provider              = "cursor"
 	DefaultExecutable     = "agent"
 	DefaultMode           = "plan"
-	DefaultStartupTimeout = 60 * time.Second
+	DefaultStartupTimeout = 2 * time.Minute
 )
 
 type CapabilityStatus string
@@ -158,6 +161,14 @@ func (a *Adapter) Preflight(ctx context.Context, request PreflightRequest) (Pref
 	if ctx == nil {
 		return PreflightResult{}, errors.New("context is required")
 	}
+	// A real Windows preflight must prove that Launch can bypass the shell
+	// wrappers which flatten multiline Prompt argv. Unit tests may inject Probe
+	// and exercise policy branches without requiring a local Cursor install.
+	if runtime.GOOS == "windows" && a.Probe == nil {
+		if _, _, nativeErr := resolveWindowsCursorNative(a.executable()); nativeErr != nil {
+			return blocked(result, "native_prompt_transport_unavailable", nativeErr.Error()), nil
+		}
+	}
 	probe := a.Probe
 	if probe == nil {
 		if a.Runner == nil {
@@ -227,14 +238,15 @@ func normalizedPermission(permission string) string {
 }
 
 type Invocation struct {
-	Executable      string
-	Workspace       string
-	Model           string
-	Mode            string
-	Trust           bool
-	ResumeSessionID string
-	ContinueLatest  bool
-	Environment     []string
+	Executable         string
+	Workspace          string
+	Model              string
+	Mode               string
+	Trust              bool
+	ResumeSessionID    string
+	ContinueLatest     bool
+	Environment        []string
+	AdditionalReadDirs []string
 }
 
 func (i Invocation) Args(prompt string) ([]string, error) {
@@ -259,23 +271,105 @@ func (i Invocation) Args(prompt string) ([]string, error) {
 		args = append(args, "--trust")
 	}
 	args = append(args, "--workspace", i.Workspace, "--model", i.Model)
+	for _, directory := range i.AdditionalReadDirs {
+		if strings.TrimSpace(directory) == "" || !filepath.IsAbs(directory) {
+			return nil, errors.New("Cursor additional read directories must be absolute")
+		}
+		args = append(args, "--add-dir", filepath.Clean(directory))
+	}
 	if strings.TrimSpace(i.ResumeSessionID) != "" {
 		args = append(args, "--resume", i.ResumeSessionID)
 	} else if i.ContinueLatest {
 		args = append(args, "--continue")
 	}
-	// Cursor declares prompt as a variadic positional. On Windows, a newline in
-	// one argv element is truncated by the current Cursor launcher. Pass each
-	// non-empty line as its own positional after the option terminator so the
-	// complete Role-first dispatch prompt reaches the Provider without any
-	// prompt text being reinterpreted as a CLI option.
-	args = append(args, "--")
-	for _, line := range strings.Split(strings.ReplaceAll(prompt, "\r\n", "\n"), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			args = append(args, line)
+	// The Prompt is one exact positional argument. Cursor concatenates multiple
+	// prompt positionals with spaces, so splitting here would destroy blank
+	// lines, indentation, Markdown and code blocks. Command resolves the native
+	// Windows launcher before this argv is executed.
+	args = append(args, "--", prompt)
+	return args, nil
+}
+
+// Command resolves the shell-free process entry used for one Cursor turn.
+// The installed Windows agent.cmd/agent.ps1 wrappers re-serialize argv and do
+// not preserve a multiline Prompt. The distribution's native node.exe plus
+// index.js path does preserve one multiline argument exactly.
+func (i Invocation) Command(prompt string) (string, []string, error) {
+	args, err := i.Args(prompt)
+	if err != nil {
+		return "", nil, err
+	}
+	executable := i.Executable
+	if runtime.GOOS != "windows" {
+		return executable, args, nil
+	}
+	native, prefix, err := resolveWindowsCursorNative(executable)
+	if err != nil {
+		return "", nil, err
+	}
+	return native, append(prefix, args...), nil
+}
+
+func resolveWindowsCursorNative(executable string) (string, []string, error) {
+	resolved, err := exec.LookPath(executable)
+	if err != nil {
+		if filepath.IsAbs(executable) {
+			if info, statErr := os.Stat(executable); statErr == nil && !info.IsDir() {
+				resolved = executable
+				err = nil
+			}
+		}
+		if err != nil {
+			return "", nil, fmt.Errorf("resolve Cursor executable: %w", err)
 		}
 	}
-	return args, nil
+	resolved, err = filepath.Abs(filepath.Clean(resolved))
+	if err != nil {
+		return "", nil, fmt.Errorf("canonicalize Cursor executable: %w", err)
+	}
+	if strings.EqualFold(filepath.Ext(resolved), ".exe") {
+		return resolved, nil, nil
+	}
+	root := filepath.Dir(resolved)
+	if node, index, ok := cursorNativeFiles(root); ok {
+		return node, []string{index}, nil
+	}
+	versions := filepath.Join(root, "versions")
+	entries, readErr := os.ReadDir(versions)
+	if readErr != nil {
+		return "", nil, fmt.Errorf("Cursor native multiline transport is unavailable: %w", readErr)
+	}
+	selected := ""
+	var selectedTime time.Time
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(versions, entry.Name())
+		if _, _, ok := cursorNativeFiles(candidate); !ok {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		modified := info.ModTime()
+		if selected == "" || modified.After(selectedTime) || modified.Equal(selectedTime) && entry.Name() > selected {
+			selected, selectedTime = entry.Name(), modified
+		}
+	}
+	if selected == "" {
+		return "", nil, errors.New("Cursor native multiline transport is unavailable")
+	}
+	node, index, _ := cursorNativeFiles(filepath.Join(versions, selected))
+	return node, []string{index}, nil
+}
+
+func cursorNativeFiles(root string) (string, string, bool) {
+	node, index := filepath.Join(root, "node.exe"), filepath.Join(root, "index.js")
+	nodeInfo, nodeErr := os.Stat(node)
+	indexInfo, indexErr := os.Stat(index)
+	return node, index, nodeErr == nil && indexErr == nil && nodeInfo.Mode().IsRegular() && indexInfo.Mode().IsRegular()
 }
 
 type LaunchRequest struct {
@@ -289,41 +383,44 @@ type LaunchRequest struct {
 	Prompt          string
 	TaskCanary      string
 	TranscriptPath  string
+	FrozenInputs    []orchestration.FrozenInputRef
 }
 
 type ExecutionResult struct {
-	Status            string
-	Reason            string
-	ProviderHandle    string
-	ProviderSessionID string
-	Terminal          bool
-	ExecutionStarted  *bool
-	SideEffectState   string
-	Identity          map[string]string
-	TaskCanary        string
-	FinalText         string
-	FinalSource       string
-	RawEventRefs      []string
-	TranscriptPath    string
-	TranscriptWritten bool
-	ExitCode          int
-	Stdout            []byte
-	Stderr            []byte
+	Status             string
+	Reason             string
+	ProviderHandle     string
+	ProviderSessionID  string
+	ProviderPromptHash string
+	Terminal           bool
+	ExecutionStarted   *bool
+	SideEffectState    string
+	Identity           map[string]string
+	TaskCanary         string
+	FinalText          string
+	FinalSource        string
+	RawEventRefs       []string
+	TranscriptPath     string
+	TranscriptWritten  bool
+	ExitCode           int
+	Stdout             []byte
+	Stderr             []byte
 }
 
 func (r ExecutionResult) HostActionResult() orchestration.HostActionResult {
 	return orchestration.HostActionResult{
-		Status:            r.Status,
-		Reason:            r.Reason,
-		ProviderHandle:    r.ProviderHandle,
-		ProviderSessionID: r.ProviderSessionID,
-		Terminal:          r.Terminal,
-		ExecutionStarted:  r.ExecutionStarted,
-		SideEffectState:   r.SideEffectState,
-		Identity:          copyMap(r.Identity),
-		TaskCanary:        r.TaskCanary,
-		RawEventRefs:      append([]string(nil), r.RawEventRefs...),
-		FinalText:         r.FinalText,
+		Status:             r.Status,
+		Reason:             r.Reason,
+		ProviderHandle:     r.ProviderHandle,
+		ProviderSessionID:  r.ProviderSessionID,
+		ProviderPromptHash: r.ProviderPromptHash,
+		Terminal:           r.Terminal,
+		ExecutionStarted:   r.ExecutionStarted,
+		SideEffectState:    r.SideEffectState,
+		Identity:           copyMap(r.Identity),
+		TaskCanary:         r.TaskCanary,
+		RawEventRefs:       append([]string(nil), r.RawEventRefs...),
+		FinalText:          r.FinalText,
 	}
 }
 
@@ -338,11 +435,11 @@ func (a *Adapter) Launch(ctx context.Context, request LaunchRequest) (ExecutionR
 	if err != nil {
 		return ExecutionResult{}, err
 	}
-	args, err := (Invocation{Executable: a.executable(), Workspace: normalized.Workspace, Model: normalized.Model, Mode: normalized.Mode, Trust: normalized.TrustAuthorized}).Args(normalized.Prompt)
+	executable, args, err := (Invocation{Executable: a.executable(), Workspace: normalized.Workspace, Model: normalized.Model, Mode: normalized.Mode, Trust: normalized.TrustAuthorized, AdditionalReadDirs: frozenInputRoots(normalized.FrozenInputs)}).Command(normalized.Prompt)
 	if err != nil {
 		return ExecutionResult{}, err
 	}
-	turn, err := a.startTurn(ctx, normalized, args, "")
+	turn, err := a.startTurn(ctx, normalized, executable, args, "", normalized.Prompt)
 	if err != nil {
 		return ExecutionResult{}, err
 	}
@@ -363,6 +460,15 @@ func (a *Adapter) Launch(ctx context.Context, request LaunchRequest) (ExecutionR
 	defer timer.Stop()
 	select {
 	case <-turn.ready:
+		if actual, count := turn.receivedPrompt(); count != 1 || actual != normalized.Prompt {
+			turn.process.Cancel()
+			select {
+			case <-turn.done:
+				return s.terminalResult(turn), nil
+			case <-time.After(2 * time.Second):
+				return s.result("cancel_unconfirmed", "prompt_transport_mismatch_cancel_unconfirmed", false), nil
+			}
+		}
 		sid := turn.sessionID()
 		s.setSessionID(sid)
 		if sid != "" {
@@ -419,6 +525,11 @@ func normalizeLaunchRequest(request LaunchRequest) (LaunchRequest, error) {
 	if request.TranscriptPath != "" && !filepath.IsAbs(request.TranscriptPath) {
 		return LaunchRequest{}, errors.New("transcript path must be absolute")
 	}
+	verifiedInputs, err := orchestration.VerifyFrozenInputs(request.FrozenInputs)
+	if err != nil {
+		return LaunchRequest{}, fmt.Errorf("verify frozen read-only inputs: %w", err)
+	}
+	request.FrozenInputs = verifiedInputs
 	return request, nil
 }
 
@@ -481,12 +592,12 @@ func (a *Adapter) Send(ctx context.Context, request SendRequest) (ExecutionResul
 	base := s.request
 	providerSessionID := s.providerSessionID
 	s.mu.Unlock()
-	args, err := (Invocation{Executable: a.executable(), Workspace: base.Workspace, Model: base.Model, Mode: base.Mode, Trust: base.TrustAuthorized, ResumeSessionID: providerSessionID}).Args(request.Prompt)
+	executable, args, err := (Invocation{Executable: a.executable(), Workspace: base.Workspace, Model: base.Model, Mode: base.Mode, Trust: base.TrustAuthorized, ResumeSessionID: providerSessionID, AdditionalReadDirs: frozenInputRoots(base.FrozenInputs)}).Command(request.Prompt)
 	if err != nil {
 		s.rollbackSend(request.ActionID)
 		return ExecutionResult{}, err
 	}
-	turn, err := a.startTurn(ctx, base, args, providerSessionID)
+	turn, err := a.startTurn(ctx, base, executable, args, providerSessionID, request.Prompt)
 	if err != nil {
 		s.rollbackSend(request.ActionID)
 		return ExecutionResult{}, err
@@ -496,7 +607,43 @@ func (a *Adapter) Send(ctx context.Context, request SendRequest) (ExecutionResul
 	s.sendInFlight = false
 	s.mu.Unlock()
 	go a.consumeTurn(s, turn)
-	return s.runningResult(), nil
+	startupTimeout := a.StartupTimeout
+	if startupTimeout <= 0 {
+		startupTimeout = DefaultStartupTimeout
+	}
+	timer := time.NewTimer(startupTimeout)
+	defer timer.Stop()
+	select {
+	case <-turn.ready:
+		if actual, count := turn.receivedPrompt(); count != 1 || actual != request.Prompt {
+			turn.process.Cancel()
+			select {
+			case <-turn.done:
+				return s.terminalResult(turn), nil
+			case <-time.After(2 * time.Second):
+				return s.result("cancel_unconfirmed", "prompt_transport_mismatch_cancel_unconfirmed", false), nil
+			}
+		}
+		return s.runningResult(), nil
+	case <-turn.done:
+		return s.terminalResult(turn), nil
+	case <-ctx.Done():
+		turn.process.Cancel()
+		select {
+		case <-turn.done:
+			return s.terminalResult(turn), nil
+		case <-time.After(2 * time.Second):
+			return s.result("cancel_unconfirmed", "send_context_cancelled", false), nil
+		}
+	case <-timer.C:
+		turn.process.CancelWithCause(context.DeadlineExceeded)
+		select {
+		case <-turn.done:
+			return s.terminalResult(turn), nil
+		case <-time.After(2 * time.Second):
+			return s.result("cancel_unconfirmed", "send_startup_timeout_cancel_unconfirmed", false), nil
+		}
+	}
 }
 
 type ObserveRequest struct {
@@ -597,6 +744,7 @@ type session struct {
 type turn struct {
 	process         *cli.Handle
 	expectedSession string
+	expectedPrompt  string
 	transcriptPath  string
 
 	mu                sync.Mutex
@@ -609,18 +757,15 @@ type turn struct {
 	doneOnce          sync.Once
 }
 
-func (a *Adapter) startTurn(ctx context.Context, request LaunchRequest, args []string, expectedSession string) (*turn, error) {
+func (a *Adapter) startTurn(ctx context.Context, request LaunchRequest, executable string, args []string, expectedSession, expectedPrompt string) (*turn, error) {
 	if a.Runner == nil {
 		a.Runner = cli.NewRunner()
 	}
-	process, err := a.Runner.Start(ctx, cli.Command{Executable: a.executable(), Args: args, Dir: request.Workspace, Environment: append([]string(nil), a.Environment...)})
+	process, err := a.Runner.Start(ctx, cli.Command{Executable: executable, Args: args, Dir: request.Workspace, Environment: append([]string(nil), a.Environment...)})
 	if err != nil {
 		return nil, err
 	}
-	turn := &turn{process: process, expectedSession: expectedSession, transcriptPath: request.TranscriptPath, done: make(chan struct{}), ready: make(chan struct{})}
-	if expectedSession != "" {
-		turn.readyOnce.Do(func() { close(turn.ready) })
-	}
+	turn := &turn{process: process, expectedSession: expectedSession, expectedPrompt: expectedPrompt, transcriptPath: request.TranscriptPath, done: make(chan struct{}), ready: make(chan struct{})}
 	return turn, nil
 }
 
@@ -659,8 +804,9 @@ func (a *Adapter) drainTurnOutput(turn *turn) {
 		turn.mu.Lock()
 		_ = turn.summary.AddLine(line)
 		sessionID := turn.summary.SessionID
+		promptObserved := turn.summary.UserEventCount > 0
 		turn.mu.Unlock()
-		if sessionID != "" {
+		if sessionID != "" && promptObserved {
 			turn.readyOnce.Do(func() { close(turn.ready) })
 		}
 	}
@@ -681,6 +827,12 @@ func (t *turn) sessionID() string {
 	return t.summary.SessionID
 }
 
+func (t *turn) receivedPrompt() (string, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.summary.ReceivedPrompt, t.summary.UserEventCount
+}
+
 func (s *session) setSessionID(id string) {
 	s.mu.Lock()
 	s.providerSessionID = id
@@ -691,7 +843,13 @@ func (s *session) runningResult() ExecutionResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	started := true
-	return ExecutionResult{Status: "running", Reason: "provider_session_started", ProviderHandle: s.providerHandle, ProviderSessionID: s.providerSessionID, Terminal: false, ExecutionStarted: &started, SideEffectState: "active", Identity: identityMap(s), TaskCanary: s.request.TaskCanary, TranscriptPath: s.request.TranscriptPath}
+	providerPromptHash := ""
+	if s.current != nil {
+		if prompt, count := s.current.receivedPrompt(); count == 1 && prompt != "" {
+			providerPromptHash = hashText(prompt)
+		}
+	}
+	return ExecutionResult{Status: "running", Reason: "provider_session_started", ProviderHandle: s.providerHandle, ProviderSessionID: s.providerSessionID, ProviderPromptHash: providerPromptHash, Terminal: false, ExecutionStarted: &started, SideEffectState: "active", Identity: identityMap(s), TaskCanary: s.request.TaskCanary, TranscriptPath: s.request.TranscriptPath}
 }
 
 func (s *session) terminalResult(turn *turn) ExecutionResult {
@@ -710,6 +868,9 @@ func (s *session) terminalResult(turn *turn) ExecutionResult {
 	if observedSessionID != "" && (turn.expectedSession == "" || observedSessionID == turn.expectedSession) {
 		s.providerSessionID = observedSessionID
 	}
+	if summary.UserEventCount > 0 && (summary.UserEventCount != 1 || summary.ReceivedPrompt != turn.expectedPrompt) {
+		return s.resultLocked("failed", "prompt_transport_mismatch", true, summary, processResult, transcriptWritten, observedSessionID)
+	}
 	if processResult.Cancelled {
 		status := "cancelled"
 		reason := "process_cancelled"
@@ -717,6 +878,9 @@ func (s *session) terminalResult(turn *turn) ExecutionResult {
 			status, reason = "timed_out", "process_timeout"
 		}
 		return s.resultLocked(status, reason, true, summary, processResult, transcriptWritten, observedSessionID)
+	}
+	if summary.UserEventCount == 0 {
+		return s.resultLocked("failed", "provider_prompt_evidence_missing", true, summary, processResult, transcriptWritten, observedSessionID)
 	}
 	if processResult.ExitCode != 0 {
 		return s.resultLocked("failed", "process_exit", true, summary, processResult, transcriptWritten, observedSessionID)
@@ -743,7 +907,13 @@ func (s *session) terminalResult(turn *turn) ExecutionResult {
 func (s *session) result(status, reason string, terminal bool) ExecutionResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return ExecutionResult{Status: status, Reason: reason, ProviderHandle: s.providerHandle, ProviderSessionID: s.providerSessionID, Terminal: terminal, ExecutionStarted: boolPtr(true), SideEffectState: "unknown", Identity: identityMap(s), TaskCanary: s.request.TaskCanary, TranscriptPath: s.request.TranscriptPath}
+	providerPromptHash := ""
+	if s.current != nil {
+		if prompt, count := s.current.receivedPrompt(); count == 1 && prompt != "" {
+			providerPromptHash = hashText(prompt)
+		}
+	}
+	return ExecutionResult{Status: status, Reason: reason, ProviderHandle: s.providerHandle, ProviderSessionID: s.providerSessionID, ProviderPromptHash: providerPromptHash, Terminal: terminal, ExecutionStarted: boolPtr(true), SideEffectState: "unknown", Identity: identityMap(s), TaskCanary: s.request.TaskCanary, TranscriptPath: s.request.TranscriptPath}
 }
 
 func (s *session) resultLocked(status, reason string, terminal bool, summary cli.StreamSummary, processResult cli.Result, transcriptWritten bool, observedSessionID string) ExecutionResult {
@@ -758,7 +928,11 @@ func (s *session) resultLocked(status, reason string, terminal bool, summary cli
 	if strings.TrimSpace(observedSessionID) != "" {
 		identitySessionID = observedSessionID
 	}
-	return ExecutionResult{Status: status, Reason: reason, ProviderHandle: s.providerHandle, ProviderSessionID: identitySessionID, Terminal: terminal, ExecutionStarted: boolPtr(true), SideEffectState: sideEffectFor(status), Identity: identityMapFor(s, identitySessionID), TaskCanary: s.request.TaskCanary, FinalText: summary.FinalText, FinalSource: summary.FinalSource, RawEventRefs: refs, TranscriptPath: s.request.TranscriptPath, TranscriptWritten: transcriptWritten, ExitCode: processResult.ExitCode, Stdout: append([]byte(nil), processResult.Stdout...), Stderr: append([]byte(nil), processResult.Stderr...)}
+	providerPromptHash := ""
+	if summary.UserEventCount == 1 && summary.ReceivedPrompt != "" {
+		providerPromptHash = hashText(summary.ReceivedPrompt)
+	}
+	return ExecutionResult{Status: status, Reason: reason, ProviderHandle: s.providerHandle, ProviderSessionID: identitySessionID, ProviderPromptHash: providerPromptHash, Terminal: terminal, ExecutionStarted: boolPtr(true), SideEffectState: sideEffectFor(status), Identity: identityMapFor(s, identitySessionID), TaskCanary: s.request.TaskCanary, FinalText: summary.FinalText, FinalSource: summary.FinalSource, RawEventRefs: refs, TranscriptPath: s.request.TranscriptPath, TranscriptWritten: transcriptWritten, ExitCode: processResult.ExitCode, Stdout: append([]byte(nil), processResult.Stdout...), Stderr: append([]byte(nil), processResult.Stderr...)}
 }
 
 func identityMap(s *session) map[string]string {
@@ -798,6 +972,26 @@ func sideEffectFor(status string) string {
 }
 
 func boolPtr(value bool) *bool { return &value }
+
+func hashText(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func frozenInputRoots(inputs []orchestration.FrozenInputRef) []string {
+	seen := map[string]struct{}{}
+	roots := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		root := filepath.Clean(input.Root)
+		key := strings.ToLower(root)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		roots = append(roots, root)
+	}
+	return roots
+}
 
 func (a *Adapter) findSession(id string) (*session, error) {
 	id = strings.TrimSpace(id)

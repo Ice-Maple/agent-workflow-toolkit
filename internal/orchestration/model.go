@@ -168,28 +168,29 @@ type WorkflowNode struct {
 }
 
 type Attempt struct {
-	ID                string            `json:"attempt_id"`
-	TaskID            string            `json:"task_id"`
-	NodeID            string            `json:"node_id"`
-	RevisionID        string            `json:"revision_id"`
-	Status            AttemptStatus     `json:"status"`
-	Binding           Binding           `json:"binding"`
-	ProviderSessionID string            `json:"provider_session_id,omitempty"`
-	ProviderHandle    string            `json:"provider_handle,omitempty"`
-	LaunchNonce       string            `json:"launch_nonce"`
-	TaskCanary        string            `json:"task_canary"`
-	ExecutionStarted  bool              `json:"execution_started"`
-	SideEffectState   string            `json:"side_effect_state"`
-	ReadOnlyIsolation bool              `json:"readonly_isolation"`
-	MCPIsolation      string            `json:"mcp_isolation,omitempty"`
-	CanaryVerified    bool              `json:"canary_verified"`
-	TerminalEventID   string            `json:"terminal_event_id,omitempty"`
-	RetryOf           string            `json:"retry_of,omitempty"`
-	FallbackOf        string            `json:"fallback_of,omitempty"`
-	Identity          map[string]string `json:"identity,omitempty"`
-	Artifacts         []ArtifactRef     `json:"artifacts,omitempty"`
-	CreatedAt         time.Time         `json:"created_at"`
-	UpdatedAt         time.Time         `json:"updated_at"`
+	ID                 string            `json:"attempt_id"`
+	TaskID             string            `json:"task_id"`
+	NodeID             string            `json:"node_id"`
+	RevisionID         string            `json:"revision_id"`
+	Status             AttemptStatus     `json:"status"`
+	Binding            Binding           `json:"binding"`
+	ProviderSessionID  string            `json:"provider_session_id,omitempty"`
+	ProviderHandle     string            `json:"provider_handle,omitempty"`
+	ProviderPromptHash string            `json:"provider_prompt_hash,omitempty"`
+	LaunchNonce        string            `json:"launch_nonce"`
+	TaskCanary         string            `json:"task_canary"`
+	ExecutionStarted   bool              `json:"execution_started"`
+	SideEffectState    string            `json:"side_effect_state"`
+	ReadOnlyIsolation  bool              `json:"readonly_isolation"`
+	MCPIsolation       string            `json:"mcp_isolation,omitempty"`
+	CanaryVerified     bool              `json:"canary_verified"`
+	TerminalEventID    string            `json:"terminal_event_id,omitempty"`
+	RetryOf            string            `json:"retry_of,omitempty"`
+	FallbackOf         string            `json:"fallback_of,omitempty"`
+	Identity           map[string]string `json:"identity,omitempty"`
+	Artifacts          []ArtifactRef     `json:"artifacts,omitempty"`
+	CreatedAt          time.Time         `json:"created_at"`
+	UpdatedAt          time.Time         `json:"updated_at"`
 }
 
 type HostAction struct {
@@ -208,17 +209,18 @@ type HostAction struct {
 }
 
 type HostActionResult struct {
-	Status            string            `json:"status"`
-	Reason            string            `json:"reason,omitempty"`
-	ProviderHandle    string            `json:"provider_handle,omitempty"`
-	ProviderSessionID string            `json:"provider_session_id,omitempty"`
-	Terminal          bool              `json:"terminal"`
-	ExecutionStarted  *bool             `json:"execution_started,omitempty"`
-	SideEffectState   string            `json:"side_effect_state,omitempty"`
-	Identity          map[string]string `json:"identity,omitempty"`
-	TaskCanary        string            `json:"task_canary,omitempty"`
-	RawEventRefs      []string          `json:"raw_event_refs,omitempty"`
-	FinalText         string            `json:"final_text,omitempty"`
+	Status             string            `json:"status"`
+	Reason             string            `json:"reason,omitempty"`
+	ProviderHandle     string            `json:"provider_handle,omitempty"`
+	ProviderSessionID  string            `json:"provider_session_id,omitempty"`
+	ProviderPromptHash string            `json:"provider_prompt_hash,omitempty"`
+	Terminal           bool              `json:"terminal"`
+	ExecutionStarted   *bool             `json:"execution_started,omitempty"`
+	SideEffectState    string            `json:"side_effect_state,omitempty"`
+	Identity           map[string]string `json:"identity,omitempty"`
+	TaskCanary         string            `json:"task_canary,omitempty"`
+	RawEventRefs       []string          `json:"raw_event_refs,omitempty"`
+	FinalText          string            `json:"final_text,omitempty"`
 }
 
 type ArtifactRef struct {
@@ -282,11 +284,24 @@ const (
 )
 
 type CollaborationStepSpec struct {
-	ID    string   `json:"id"`
-	Role  string   `json:"role"`
-	Task  string   `json:"task"`
-	Count int      `json:"count,omitempty"`
-	After []string `json:"after,omitempty"`
+	ID           string           `json:"id"`
+	Role         string           `json:"role"`
+	Task         string           `json:"task"`
+	Count        int              `json:"count,omitempty"`
+	After        []string         `json:"after,omitempty"`
+	FrozenInputs []FrozenInputRef `json:"frozen_inputs,omitempty" yaml:"-"`
+}
+
+// FrozenInputRef is a host-created, immutable read-only input. The framework
+// stores only its identity and verifies the file again before admission and
+// dispatch; Provider output and repository data are not copied into state.
+type FrozenInputRef struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Root   string `json:"root"`
+	Format string `json:"format,omitempty"`
+	Bytes  int64  `json:"bytes"`
+	SHA256 string `json:"sha256"`
 }
 
 type CollaborationPlan struct {

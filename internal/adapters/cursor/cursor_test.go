@@ -2,16 +2,19 @@ package cursor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"agent-workflow-toolkit/internal/adapters/cli"
+	"agent-workflow-toolkit/internal/orchestration"
 )
 
 func TestInvocationUsesExplicitReadOnlyStreamContract(t *testing.T) {
@@ -42,14 +45,15 @@ func TestInvocationUsesExplicitReadOnlyStreamContract(t *testing.T) {
 }
 
 func TestDefaultStartupTimeoutCoversVerifiedBridgeWindow(t *testing.T) {
-	if DefaultStartupTimeout < 60*time.Second {
-		t.Fatalf("Cursor default startup timeout = %s, want at least 60s for the verified bridge path", DefaultStartupTimeout)
+	if DefaultStartupTimeout < 2*time.Minute {
+		t.Fatalf("Cursor default startup timeout = %s, want at least 2m for a provider cold start behind an already-ready bridge owner", DefaultStartupTimeout)
 	}
 }
 
 func TestInvocationPreservesEveryMultilinePromptSegmentAfterOptionTerminator(t *testing.T) {
 	workspace := filepath.Clean(`E:\workspace\authorized`)
-	args, err := (Invocation{Executable: "agent", Workspace: workspace, Model: "cursor-grok-4.6-high", Mode: "plan", Trust: true}).Args("Framework envelope (collaboration/v1):\nrole=sample/reviewer\n\n--force is forbidden prompt text\nReturn CURSOR_FRAMEWORK_OK")
+	prompt := "Framework envelope (collaboration/v1):\nrole=sample/reviewer\n\n  indented Markdown\n```text\n--force is prompt text\n```\nReturn CURSOR_FRAMEWORK_OK"
+	args, err := (Invocation{Executable: "agent", Workspace: workspace, Model: "cursor-grok-4.6-high", Mode: "plan", Trust: true}).Args(prompt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,9 +67,97 @@ func TestInvocationPreservesEveryMultilinePromptSegmentAfterOptionTerminator(t *
 	if separator < 0 {
 		t.Fatalf("Cursor prompt option terminator is missing: %#v", args)
 	}
-	want := []string{"Framework envelope (collaboration/v1):", "role=sample/reviewer", "--force is forbidden prompt text", "Return CURSOR_FRAMEWORK_OK"}
+	want := []string{prompt}
 	if got := args[separator+1:]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("multiline Cursor prompt args = %#v, want %#v", got, want)
+	}
+}
+
+func TestCommandUsesNativeWindowsCursorLauncherForExactMultilinePrompt(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows Cursor wrapper resolution")
+	}
+	root := t.TempDir()
+	wrapper := filepath.Join(root, "agent.cmd")
+	versionRoot := filepath.Join(root, "versions", "2026.08.11-e8db854")
+	if err := os.MkdirAll(versionRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{wrapper, filepath.Join(versionRoot, "node.exe"), filepath.Join(versionRoot, "index.js")} {
+		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prompt := "line one\n\n  indented\n```text\n--leading\n```"
+	executable, args, err := (Invocation{Executable: wrapper, Workspace: root, Model: "fixture", Mode: "plan", Trust: true}).Command(prompt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executable != filepath.Join(versionRoot, "node.exe") || len(args) < 3 || args[0] != filepath.Join(versionRoot, "index.js") || args[len(args)-1] != prompt || args[len(args)-2] != "--" {
+		t.Fatalf("native Cursor command executable=%q args=%#v", executable, args)
+	}
+}
+
+func TestCommandSelectsNewestNativeCursorLauncherByModificationTime(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows Cursor wrapper resolution")
+	}
+	root := t.TempDir()
+	wrapper := filepath.Join(root, "agent.cmd")
+	older := filepath.Join(root, "versions", "z-lexically-last")
+	newer := filepath.Join(root, "versions", "a-actually-newest")
+	for _, directory := range []string{older, newer} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"node.exe", "index.js"} {
+			if err := os.WriteFile(filepath.Join(directory, name), []byte("fixture"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.WriteFile(wrapper, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(older, base, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newer, base.Add(time.Minute), base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	executable, _, err := (Invocation{Executable: wrapper, Workspace: root, Model: "fixture", Mode: "ask", Trust: true}).Command("review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executable != filepath.Join(newer, "node.exe") {
+		t.Fatalf("native Cursor executable=%q want=%q", executable, filepath.Join(newer, "node.exe"))
+	}
+}
+
+func TestInvocationAddsOnlyExplicitFrozenInputRoot(t *testing.T) {
+	workspace, inputRoot := t.TempDir(), t.TempDir()
+	args, err := (Invocation{Executable: os.Args[0], Workspace: workspace, Model: "fixture", Mode: "plan", Trust: true, AdditionalReadDirs: []string{inputRoot}}).Args("review frozen input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPair(args, "--add-dir", inputRoot) || args[len(args)-1] != "review frozen input" {
+		t.Fatalf("frozen input invocation args = %#v", args)
+	}
+}
+
+func TestLaunchRejectsChangedFrozenInputBeforeProviderStart(t *testing.T) {
+	workspace, root := t.TempDir(), t.TempDir()
+	path := filepath.Join(root, "review.md")
+	content := []byte("# Review\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := New(os.Args[0])
+	adapter.Environment = []string{"CURSOR_ADAPTER_HELPER=1"}
+	_, err := adapter.Launch(t.Context(), LaunchRequest{Workspace: workspace, Model: "fixture", Mode: "plan", Permission: "read-only", TrustAuthorized: true, Prompt: "review", TaskCanary: "frozen-canary", FrozenInputs: []orchestration.FrozenInputRef{{Name: "repository-review", Path: path, Root: root, Format: "markdown", Bytes: int64(len(content)), SHA256: strings.Repeat("0", 64)}}})
+	if err == nil || !strings.Contains(err.Error(), "SHA-256 changed") {
+		t.Fatalf("changed frozen input error = %v", err)
 	}
 }
 
@@ -184,6 +276,20 @@ func TestLaunchStartupTimeoutReportsOnlyAfterProcessTermination(t *testing.T) {
 	defer func() { _ = adapter.Cleanup(CleanupRequest{HandleID: result.ProviderHandle}) }()
 	if result.Status != "timed_out" || result.Reason != "process_timeout" || !result.Terminal || result.ProviderSessionID != "" {
 		t.Fatalf("startup-timeout result = %#v", result)
+	}
+}
+
+func TestLaunchFailsClosedWhenProviderVisiblePromptDiffers(t *testing.T) {
+	workspace := t.TempDir()
+	adapter := New(os.Args[0])
+	adapter.Environment = []string{"CURSOR_ADAPTER_HELPER=1", "CURSOR_ADAPTER_HELPER_MODE=prompt-mismatch"}
+	request := LaunchRequest{Workspace: workspace, Model: "fixture-model", Mode: "plan", Permission: "read-only", TrustAuthorized: true, Prompt: "line one\n\n  indented\n--leading", TaskCanary: "canary-prompt-mismatch"}
+	result, err := adapter.Launch(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "failed" || result.Reason != "prompt_transport_mismatch" || !result.Terminal || result.ProviderPromptHash == "" || result.ProviderPromptHash == hashText(request.Prompt) {
+		t.Fatalf("prompt mismatch result = %#v", result)
 	}
 }
 
@@ -471,25 +577,33 @@ func waitForTerminalWithExpectedReason(t *testing.T, adapter *Adapter, handle, r
 
 func TestMain(m *testing.M) {
 	if os.Getenv("CURSOR_ADAPTER_HELPER") == "1" {
+		prompt := helperPrompt(os.Args[1:])
+		if os.Getenv("CURSOR_ADAPTER_HELPER_MODE") == "prompt-mismatch" {
+			prompt += "\ntransport mutation"
+		}
 		if os.Getenv("CURSOR_ADAPTER_HELPER_MODE") == "no-session-sleep" {
 			time.Sleep(30 * time.Second)
 			os.Exit(0)
 		}
 		if os.Getenv("CURSOR_ADAPTER_HELPER_MODE") == "mismatched-session" && contains(os.Args[1:], "--resume") {
 			fmt.Println(`{"type":"system","subtype":"init","session_id":"cursor-foreign-session"}`)
+			printHelperUserEvent(prompt, "cursor-foreign-session")
 			fmt.Println(`{"type":"result","subtype":"success","is_error":false,"result":"FOREIGN_SESSION"}`)
 			os.Exit(0)
 		}
 		if os.Getenv("CURSOR_ADAPTER_HELPER_MODE") == "no-session-on-resume" && contains(os.Args[1:], "--resume") {
+			printHelperUserEvent(prompt, "")
 			fmt.Println(`{"type":"result","subtype":"success","is_error":false,"result":"NO_SESSION"}`)
 			os.Exit(0)
 		}
 		if os.Getenv("CURSOR_ADAPTER_HELPER_MODE") == "provider-error" {
 			fmt.Println(`{"type":"system","subtype":"init","session_id":"cursor-session-1"}`)
+			printHelperUserEvent(prompt, "cursor-session-1")
 			fmt.Println(`{"type":"result","subtype":"error","is_error":true,"error":"PROVIDER_ERROR","result":"SHOULD_NOT_DELIVER"}`)
 			os.Exit(0)
 		}
 		fmt.Println(`{"type":"system","subtype":"init","session_id":"cursor-session-1"}`)
+		printHelperUserEvent(prompt, "cursor-session-1")
 		if os.Getenv("CURSOR_ADAPTER_HELPER_MODE") == "sleep" {
 			time.Sleep(30 * time.Second)
 			os.Exit(0)
@@ -503,6 +617,23 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func helperPrompt(args []string) string {
+	for index, value := range args {
+		if value == "--" && index+1 < len(args) {
+			return args[index+1]
+		}
+	}
+	return ""
+}
+
+func printHelperUserEvent(prompt, sessionID string) {
+	event := map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []map[string]string{{"type": "text", "text": prompt}}}}
+	if sessionID != "" {
+		event["session_id"] = sessionID
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(event)
 }
 
 func contains(values []string, wanted string) bool {

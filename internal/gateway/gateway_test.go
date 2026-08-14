@@ -33,11 +33,22 @@ func TestRoleFirstCollaborationInstanceTechnicalReleaseAdvancesFrozenDAG(t *test
 	sum := sha256.Sum256([]byte(prompt))
 	promptHash := fmt.Sprintf("%x", sum[:])
 	role := "workflow/independent-reviewer"
-	binding := orchestration.Binding{Role: role, Adapter: "fake", Model: "fixture-model", Reasoning: "none", Permission: "read-only", Workspace: workspace}
+	frozenRoot := t.TempDir()
+	frozenPath := filepath.Join(frozenRoot, "git-review.md")
+	frozenContent := []byte("# Frozen Git review input\n\n## Git status\n\n```text\n M file.go\n```\n")
+	if err := os.WriteFile(frozenPath, frozenContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	frozenSum := sha256.Sum256(frozenContent)
+	frozenInput := orchestration.FrozenInputRef{Name: "repository-review", Path: frozenPath, Root: frozenRoot, Format: "markdown", Bytes: int64(len(frozenContent)), SHA256: fmt.Sprintf("%x", frozenSum[:])}
+	profile := orchestration.AdapterProfile{ID: "cursor-review", Adapter: "cursor", Executable: "agent", Trust: "authorized", Mode: "ask"}
+	profile.ProfileHash = orchestration.HashAdapterProfile(profile)
+	binding := orchestration.Binding{Role: role, Adapter: "cursor", ProfileID: profile.ID, Model: "fixture-model", Reasoning: "none", Permission: "read-only", Workspace: workspace}
 	config := policy.DefaultConfig()
 	config.RegisteredBindings = []orchestration.Binding{binding}
 	config.RoleRoutes = map[string]orchestration.RoleRoute{role: {Role: role, Primary: binding}}
 	config.RoleDefinitions = map[string]orchestration.RoleDefinition{role: {ID: role, Package: "workflow", Version: "1.0.0", PromptPath: promptPath, PromptHash: promptHash}}
+	config.AdapterProfiles = map[string]orchestration.AdapterProfile{profile.ID: profile}
 	if err := config.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +85,7 @@ func TestRoleFirstCollaborationInstanceTechnicalReleaseAdvancesFrozenDAG(t *test
 		t.Fatal(err)
 	}
 	plan := orchestration.CollaborationPlan{SchemaVersion: "collaboration/v1", RolePromptHashes: map[string]string{role: promptHash}, Steps: []orchestration.CollaborationStepSpec{
-		{ID: "draft", Role: role, Task: "Produce the draft review"},
+		{ID: "draft", Role: role, Task: "Produce the draft review", FrozenInputs: []orchestration.FrozenInputRef{frozenInput}},
 		{ID: "follow-up", Role: role, Task: "Review the released draft", After: []string{"draft"}},
 	}}
 	runResult, err := core.CreateCollaborationRun(CreateCollaborationRunInput{TaskID: task.Task.ID, RevisionID: task.Revision.ID, Workspace: workspace, EffectiveMode: orchestration.CollaborationFramework, GateEpoch: status.GateEpoch, Plan: plan, StateDir: store.Root()})
@@ -96,14 +107,17 @@ func TestRoleFirstCollaborationInstanceTechnicalReleaseAdvancesFrozenDAG(t *test
 		t.Fatal(err)
 	}
 	dispatchPrompt := actionStringForTest(launch.LaunchAction.Parameters, "dispatch_prompt")
-	for _, expected := range []string{"run_id=" + runResult.Run.ID, "instance_id=" + first.Instance.ID, "Review the actual files.", "Produce the draft review", "task_canary=" + launch.Attempt.TaskCanary} {
+	for _, expected := range []string{"run_id=" + runResult.Run.ID, "instance_id=" + first.Instance.ID, "Review the actual files.", "Produce the draft review", "task_canary=" + launch.Attempt.TaskCanary, "Frozen read-only inputs:", frozenInput.SHA256, filepath.Base(frozenPath)} {
 		if !strings.Contains(dispatchPrompt, expected) {
 			t.Fatalf("dispatch prompt missing %q: %s", expected, dispatchPrompt)
 		}
 	}
+	if _, ok := launch.LaunchAction.Parameters["frozen_inputs"]; !ok {
+		t.Fatal("launch action did not carry the frozen input contract")
+	}
 	started := true
-	identity := map[string]string{"provider": "fake", "session": "role-first-session", "workspace": workspace}
-	if _, err := core.SubmitHostActionResult(SubmitHostActionResultInput{AttemptID: launch.Attempt.ID, ActionID: launch.LaunchAction.ID, Lease: launch.LaunchAction.Lease, Result: orchestration.HostActionResult{Status: "completed", Terminal: true, ProviderHandle: "role-first-handle", ProviderSessionID: "role-first-session", ExecutionStarted: &started, SideEffectState: "none", Identity: identity, TaskCanary: launch.Attempt.TaskCanary}}); err != nil {
+	identity := map[string]string{"provider": "cursor", "session": "role-first-session", "workspace": workspace}
+	if _, err := core.SubmitHostActionResult(SubmitHostActionResultInput{AttemptID: launch.Attempt.ID, ActionID: launch.LaunchAction.ID, Lease: launch.LaunchAction.Lease, Result: orchestration.HostActionResult{Status: "completed", Terminal: true, ProviderHandle: "role-first-handle", ProviderSessionID: "role-first-session", ProviderPromptHash: actionStringForTest(launch.LaunchAction.Parameters, "dispatch_prompt_hash"), ExecutionStarted: &started, SideEffectState: "none", Identity: identity, TaskCanary: launch.Attempt.TaskCanary}}); err != nil {
 		t.Fatal(err)
 	}
 	completion, err := core.RequestCompletion(CompletionInput{AttemptID: launch.Attempt.ID, CollaborationRunID: runResult.Run.ID, InstanceRunID: first.Instance.ID, GateEpoch: status.GateEpoch})
@@ -148,6 +162,35 @@ func TestRoleFirstCollaborationInstanceTechnicalReleaseAdvancesFrozenDAG(t *test
 		t.Fatal("technical release unexpectedly left a human checkpoint to approve")
 	} else if gatewayErr, ok := err.(*Error); !ok || gatewayErr.Code != "checkpoint_required" {
 		t.Fatalf("technical release human decision error = %v", err)
+	}
+}
+
+func TestFrozenInputCapabilityRequiresVerifiedCursorReadOnlyRoute(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "review.md")
+	content := []byte("# Frozen review\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+	input := []orchestration.FrozenInputRef{{Name: "repository-review", Path: path, Root: root, Format: "markdown", Bytes: int64(len(content)), SHA256: fmt.Sprintf("%x", sum[:])}}
+	for _, test := range []struct {
+		name    string
+		binding orchestration.Binding
+		mode    string
+		wantErr bool
+	}{
+		{name: "cursor ask read-only", binding: orchestration.Binding{Adapter: "cursor", Permission: "read-only"}, mode: "ask"},
+		{name: "plan cannot deliver reviewer result", binding: orchestration.Binding{Adapter: "cursor", Permission: "read-only"}, mode: "plan", wantErr: true},
+		{name: "unverified adapter", binding: orchestration.Binding{Adapter: "claude", Permission: "read-only"}, mode: "ask", wantErr: true},
+		{name: "write permission", binding: orchestration.Binding{Adapter: "cursor", Permission: "write"}, mode: "ask", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateFrozenInputCapability(test.binding, test.mode, input)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validateFrozenInputCapability() error=%v wantErr=%t", err, test.wantErr)
+			}
+		})
 	}
 }
 
@@ -1044,6 +1087,14 @@ func preparedAttemptForTest(t *testing.T) (*Gateway, *storage.Store, LaunchDecis
 }
 
 func preparedAttemptForTestWithOutput(t *testing.T, expected orchestration.ExpectedOutput) (*Gateway, *storage.Store, LaunchDecision) {
+	return preparedAttemptForTestWithAdapterAndOutput(t, "fake", expected)
+}
+
+func preparedAttemptForTestWithAdapter(t *testing.T, adapter string) (*Gateway, *storage.Store, LaunchDecision) {
+	return preparedAttemptForTestWithAdapterAndOutput(t, adapter, orchestration.ExpectedOutput{})
+}
+
+func preparedAttemptForTestWithAdapterAndOutput(t *testing.T, adapter string, expected orchestration.ExpectedOutput) (*Gateway, *storage.Store, LaunchDecision) {
 	t.Helper()
 	root := t.TempDir()
 	workspace := filepath.Join(root, "workspace")
@@ -1057,7 +1108,7 @@ func preparedAttemptForTestWithOutput(t *testing.T, expected orchestration.Expec
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding := orchestration.Binding{Role: "reviewer", Adapter: "fake", Model: "fixture-model", Reasoning: "none", Permission: "read-only", Workspace: workspace}
+	binding := orchestration.Binding{Role: "reviewer", Adapter: adapter, Model: "fixture-model", Reasoning: "none", Permission: "read-only", Workspace: workspace}
 	config := policy.DefaultConfig()
 	config.RegisteredBindings = []orchestration.Binding{binding}
 	core, err := New(store, config)
@@ -1080,6 +1131,34 @@ func preparedAttemptForTestWithOutput(t *testing.T, expected orchestration.Expec
 		t.Fatal(err)
 	}
 	return core, store, launch
+}
+
+func TestCursorProviderPromptHashMismatchContaminatesAttempt(t *testing.T) {
+	core, store, launch := preparedAttemptForTestWithAdapter(t, "cursor")
+	started := true
+	receipt, err := core.SubmitHostActionResult(SubmitHostActionResultInput{
+		AttemptID: launch.Attempt.ID,
+		ActionID:  launch.LaunchAction.ID,
+		Lease:     launch.LaunchAction.Lease,
+		Result: orchestration.HostActionResult{
+			Status: "running", ProviderHandle: "cursor-handle", ProviderSessionID: "cursor-session",
+			ProviderPromptHash: strings.Repeat("0", 64), ExecutionStarted: &started, SideEffectState: "none",
+			Identity: map[string]string{"provider": "cursor", "session": "cursor-session", "workspace": launch.Attempt.Binding.Workspace}, TaskCanary: launch.Attempt.TaskCanary,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Attempt.Status != orchestration.AttemptContaminated || len(receipt.Next) != 0 {
+		t.Fatalf("Prompt hash mismatch receipt = %#v", receipt)
+	}
+	state, err := store.Load(launch.Attempt.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Attempts[launch.Attempt.ID].Status != orchestration.AttemptContaminated || state.Task.Status != orchestration.TaskAwaitingHumanDecision || state.Nodes[launch.Attempt.NodeID].Status != orchestration.NodeAwaitingHumanDecision {
+		t.Fatalf("Prompt hash contamination was not persisted: task=%#v node=%#v attempt=%#v", state.Task, state.Nodes[launch.Attempt.NodeID], state.Attempts[launch.Attempt.ID])
+	}
 }
 
 func toFakeAction(action orchestration.HostAction) fake.HostAction {

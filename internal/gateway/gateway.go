@@ -507,6 +507,15 @@ func (g *Gateway) PrepareCollaborationInstance(input PrepareCollaborationInstanc
 		return PrepareCollaborationInstanceResult{}, fail("role_route_missing", err.Error(), map[string]any{"role": instance.Role})
 	}
 	preflight := g.config.Preflight(state.Task, binding)
+	if preflight.Status == "passed" && len(step.FrozenInputs) > 0 {
+		profileMode := ""
+		if profile, ok := g.config.AdapterProfiles[binding.ProfileID]; ok {
+			profileMode = profile.Mode
+		}
+		if frozenErr := validateFrozenInputCapability(binding, profileMode, step.FrozenInputs); frozenErr != nil {
+			preflight = policy.PreflightDecision{Status: "blocked", Code: "frozen_input_unavailable", Reason: frozenErr.Error(), MCPIsolation: selectedMCPIsolation(g.config.MCPIsolation), Binding: binding}
+		}
+	}
 	now := time.Now().UTC()
 	kind := strings.TrimSpace(input.Kind)
 	if kind == "" {
@@ -739,6 +748,9 @@ func validateCollaborationPlan(plan orchestration.CollaborationPlan) error {
 		if step.Count < 0 {
 			return fmt.Errorf("step %q count cannot be negative", step.ID)
 		}
+		if err := validateFrozenInputs(step.FrozenInputs); err != nil {
+			return fmt.Errorf("step %q frozen input: %w", step.ID, err)
+		}
 	}
 	for index := range plan.Steps {
 		for _, dependency := range plan.Steps[index].After {
@@ -779,6 +791,27 @@ func validateCollaborationPlan(plan orchestration.CollaborationPlan) error {
 		if err := visit(id); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateFrozenInputs(inputs []orchestration.FrozenInputRef) error {
+	_, err := orchestration.VerifyFrozenInputs(inputs)
+	return err
+}
+
+func validateFrozenInputCapability(binding orchestration.Binding, profileMode string, inputs []orchestration.FrozenInputRef) error {
+	if err := validateFrozenInputs(inputs); err != nil {
+		return err
+	}
+	if !strings.EqualFold(strings.TrimSpace(binding.Adapter), "cursor") {
+		return fmt.Errorf("adapter %q has no verified frozen read-only input transport", binding.Adapter)
+	}
+	if !strings.EqualFold(strings.TrimSpace(binding.Permission), "read-only") {
+		return fmt.Errorf("frozen input transport requires read-only permission, got %q", binding.Permission)
+	}
+	if !strings.EqualFold(strings.TrimSpace(profileMode), "ask") {
+		return fmt.Errorf("project Role frozen input requires Cursor ask mode for a final business response, got %q", profileMode)
 	}
 	return nil
 }
@@ -1533,18 +1566,23 @@ func (g *Gateway) prepareAttempt(state storage.State, node orchestration.Workflo
 			rolePromptHash = definition.PromptHash
 		}
 	}
-	if generated, collaboration, promptErr := g.collaborationDispatchPrompt(state, node, attempt); promptErr != nil {
+	var frozenInputs []orchestration.FrozenInputRef
+	if generated, inputs, collaboration, promptErr := g.collaborationDispatchPrompt(state, node, attempt); promptErr != nil {
 		return LaunchDecision{}, promptErr
 	} else if collaboration {
 		if strings.TrimSpace(dispatchPrompt) != "" && dispatchPrompt != generated {
 			return LaunchDecision{}, fail("dispatch_prompt_mismatch", "collaboration dispatch prompt must be generated from the frozen Role Prompt and step payload", nil)
 		}
 		dispatchPrompt = generated
+		frozenInputs = inputs
 	}
 	if dispatchPrompt = strings.TrimSpace(dispatchPrompt); dispatchPrompt == "" {
 		dispatchPrompt = fmt.Sprintf("我将发送当前任务给 %s（%s / %s / reasoning=%s）进行处理。", attempt.Binding.Role, attempt.Binding.Adapter, attempt.Binding.Model, attempt.Binding.Reasoning)
 	}
 	parameters := map[string]any{"task_id": state.Task.ID, "attempt_id": attempt.ID, "launch_nonce": attempt.LaunchNonce, "task_canary": attempt.TaskCanary, "binding": attempt.Binding, "expected_output": node.ExpectedOutput, "mcp_isolation": attempt.MCPIsolation, "dispatch_prompt": dispatchPrompt, "dispatch_prompt_hash": hashBytes([]byte(dispatchPrompt))}
+	if len(frozenInputs) > 0 {
+		parameters["frozen_inputs"] = append([]orchestration.FrozenInputRef(nil), frozenInputs...)
+	}
 	if rolePromptHash != "" {
 		parameters["role_prompt_hash"] = rolePromptHash
 	}
@@ -1578,7 +1616,7 @@ func (g *Gateway) prepareAttempt(state storage.State, node orchestration.Workflo
 // are combined before the launch action is signed. It returns collaboration=
 // false for legacy nodes so their existing caller-supplied/generic prompt
 // behavior remains compatible.
-func (g *Gateway) collaborationDispatchPrompt(state storage.State, node orchestration.WorkflowNode, attempt orchestration.Attempt) (prompt string, collaboration bool, err error) {
+func (g *Gateway) collaborationDispatchPrompt(state storage.State, node orchestration.WorkflowNode, attempt orchestration.Attempt) (prompt string, frozenInputs []orchestration.FrozenInputRef, collaboration bool, err error) {
 	var instance orchestration.InstanceRun
 	found := false
 	for _, candidate := range state.InstanceRuns {
@@ -1590,33 +1628,36 @@ func (g *Gateway) collaborationDispatchPrompt(state storage.State, node orchestr
 		break
 	}
 	if !found {
-		return "", false, nil
+		return "", nil, false, nil
 	}
 	run, ok := state.CollaborationRuns[instance.RunID]
 	if !ok || run.TaskID != state.Task.ID || run.RevisionID != node.RevisionID {
-		return "", true, fail("collaboration_mapping_invalid", "Attempt is not attached to its frozen collaboration run", nil)
+		return "", nil, true, fail("collaboration_mapping_invalid", "Attempt is not attached to its frozen collaboration run", nil)
 	}
 	definition, err := g.config.RoleDefinition(instance.Role)
 	if err != nil {
-		return "", true, fail("role_registry_rejected", err.Error(), map[string]any{"role": instance.Role})
+		return "", nil, true, fail("role_registry_rejected", err.Error(), map[string]any{"role": instance.Role})
 	}
 	expectedHash := strings.TrimSpace(run.RolePromptHashes[instance.Role])
 	if expectedHash == "" || !strings.EqualFold(expectedHash, definition.PromptHash) {
-		return "", true, fail("role_prompt_hash_mismatch", "collaboration Role Prompt hash does not match the frozen run", nil)
+		return "", nil, true, fail("role_prompt_hash_mismatch", "collaboration Role Prompt hash does not match the frozen run", nil)
 	}
 	if strings.TrimSpace(definition.PromptPath) == "" {
-		return "", true, fail("role_prompt_unavailable", "the verified collaboration Role Prompt has no local prompt path", nil)
+		return "", nil, true, fail("role_prompt_unavailable", "the verified collaboration Role Prompt has no local prompt path", nil)
 	}
 	raw, readErr := os.ReadFile(filepath.Clean(definition.PromptPath))
 	if readErr != nil {
-		return "", true, fail("role_prompt_unavailable", "the verified collaboration Role Prompt cannot be read", nil)
+		return "", nil, true, fail("role_prompt_unavailable", "the verified collaboration Role Prompt cannot be read", nil)
 	}
 	if !strings.EqualFold(expectedHash, hashBytes(raw)) {
-		return "", true, fail("role_prompt_changed", "the collaboration Role Prompt changed after registry admission", nil)
+		return "", nil, true, fail("role_prompt_changed", "the collaboration Role Prompt changed after registry admission", nil)
 	}
 	step, ok := collaborationStep(run.Plan, instance.StepID)
 	if !ok {
-		return "", true, fail("collaboration_step_missing", "Attempt step is not present in the frozen collaboration plan", nil)
+		return "", nil, true, fail("collaboration_step_missing", "Attempt step is not present in the frozen collaboration plan", nil)
+	}
+	if err := validateFrozenInputs(step.FrozenInputs); err != nil {
+		return "", nil, true, fail("frozen_input_changed", err.Error(), map[string]any{"step_id": step.ID})
 	}
 	outputRequirements := "{}"
 	if rawOutput, marshalErr := json.Marshal(node.ExpectedOutput); marshalErr == nil {
@@ -1629,12 +1670,18 @@ func (g *Gateway) collaborationDispatchPrompt(state storage.State, node orchestr
 	rolePrompt = strings.ReplaceAll(rolePrompt, "{{output_requirements}}", outputRequirements)
 	inputs, inputErr := collaborationDependencyInputs(state, run.ID, step.After)
 	if inputErr != nil {
-		return "", true, inputErr
+		return "", nil, true, inputErr
 	}
 	rolePrompt = strings.ReplaceAll(rolePrompt, "{{ inputs }}", inputs)
 	rolePrompt = strings.ReplaceAll(rolePrompt, "{{inputs}}", inputs)
-	prompt = fmt.Sprintf("Framework envelope (collaboration/v1):\nrun_id=%s\nstep_id=%s\ninstance_id=%s\ntask_id=%s\nrole=%s\nrole_prompt_hash=%s\ntask_canary=%s\n\n%s\n\nStep payload:\n%s\n\nUpstream outputs:\n%s\n\nOutput requirements:\n%s", run.ID, instance.StepID, instance.ID, attempt.TaskID, instance.Role, expectedHash, attempt.TaskCanary, rolePrompt, step.Task, inputs, outputRequirements)
-	return prompt, true, nil
+	frozenInputMetadata := "[]"
+	if len(step.FrozenInputs) > 0 {
+		if rawInputs, marshalErr := json.Marshal(step.FrozenInputs); marshalErr == nil {
+			frozenInputMetadata = string(rawInputs)
+		}
+	}
+	prompt = fmt.Sprintf("Framework envelope (collaboration/v1):\nrun_id=%s\nstep_id=%s\ninstance_id=%s\ntask_id=%s\nrole=%s\nrole_prompt_hash=%s\ntask_canary=%s\n\n%s\n\nStep payload:\n%s\n\nFrozen read-only inputs:\n%s\nThe Gateway, bridge and Adapter have verified each declared path, byte length and SHA-256. Read the declared artifact with read-only file tools. Do not run Shell to reconstruct repository state.\n\nUpstream outputs:\n%s\n\nOutput requirements:\n%s", run.ID, instance.StepID, instance.ID, attempt.TaskID, instance.Role, expectedHash, attempt.TaskCanary, rolePrompt, step.Task, frozenInputMetadata, inputs, outputRequirements)
+	return prompt, append([]orchestration.FrozenInputRef(nil), step.FrozenInputs...), true, nil
 }
 
 func collaborationDependencyInputs(state storage.State, runID string, dependencies []string) (string, error) {
@@ -1803,6 +1850,7 @@ func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (Act
 		return ActionReceipt{}, fail("invalid_action_result", "result.status is required", nil)
 	}
 	input.Result.SideEffectState = strings.ToLower(strings.TrimSpace(input.Result.SideEffectState))
+	input.Result.ProviderPromptHash = strings.ToLower(strings.TrimSpace(input.Result.ProviderPromptHash))
 	if !action.ExpiresAt.IsZero() && time.Now().UTC().After(action.ExpiresAt) {
 		action.Status = orchestration.ActionUnknown
 		state.Actions[action.ID] = action
@@ -1854,6 +1902,20 @@ func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (Act
 		attempt.SideEffectState = strings.ToLower(strings.TrimSpace(input.Result.SideEffectState))
 	}
 	failureLike := input.Result.Status == "failed" || input.Result.Status == "error" || input.Result.Status == "timed_out" || input.Result.Status == "timeout"
+	promptEvidenceRequired := strings.EqualFold(attempt.Binding.Adapter, "cursor") && (action.Kind == orchestration.ActionLaunch || action.Kind == orchestration.ActionObserve) && !failureLike
+	promptEvidenceMismatch := false
+	if strings.EqualFold(attempt.Binding.Adapter, "cursor") && (action.Kind == orchestration.ActionLaunch || action.Kind == orchestration.ActionObserve) && input.Result.ProviderPromptHash != "" {
+		expectedPromptHash := attempt.ProviderPromptHash
+		if action.Kind == orchestration.ActionLaunch {
+			expectedPromptHash = stringParameter(action.Parameters, "dispatch_prompt_hash")
+		}
+		if expectedPromptHash == "" || !strings.EqualFold(expectedPromptHash, input.Result.ProviderPromptHash) {
+			promptEvidenceMismatch = true
+			attempt.Status = orchestration.AttemptContaminated
+		} else {
+			attempt.ProviderPromptHash = input.Result.ProviderPromptHash
+		}
+	}
 	if (action.Kind == orchestration.ActionLaunch || action.Kind == orchestration.ActionObserve) && failureLike && (input.Result.ExecutionStarted == nil || input.Result.SideEffectState == "") {
 		// Missing execution evidence is unknown, never an implicit "none".
 		// This prevents a failed launch from entering the automatic pre-start
@@ -1870,6 +1932,9 @@ func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (Act
 				evidenceIncomplete = true
 			}
 			if input.Result.Identity != nil && !identityHasSession(input.Result.Identity) {
+				evidenceIncomplete = true
+			}
+			if promptEvidenceRequired && input.Result.ProviderPromptHash == "" {
 				evidenceIncomplete = true
 			}
 		}
@@ -1944,18 +2009,20 @@ func (g *Gateway) SubmitHostActionResult(input SubmitHostActionResultInput) (Act
 		return ActionReceipt{}, err
 	}
 	event := g.eventFor(state, "host_action.result", attempt.ID, action.ID, map[string]any{
-		"action_id":                  action.ID,
-		"kind":                       action.Kind,
-		"status":                     input.Result.Status,
-		"reason":                     input.Result.Reason,
-		"terminal":                   input.Result.Terminal,
-		"identity_present":           len(input.Result.Identity) > 0,
-		"provider_session_present":   input.Result.ProviderSessionID != "" || identityHasSession(input.Result.Identity),
-		"task_canary_present":        input.Result.TaskCanary != "",
-		"execution_evidence_present": input.Result.ExecutionStarted != nil && input.Result.SideEffectState != "",
-		"mcp_isolation":              action.Parameters["mcp_isolation"],
-		"contamination_checkpoint":   contaminationCheckpoint,
-		"raw_event_refs":             append([]string(nil), input.Result.RawEventRefs...),
+		"action_id":                    action.ID,
+		"kind":                         action.Kind,
+		"status":                       input.Result.Status,
+		"reason":                       input.Result.Reason,
+		"terminal":                     input.Result.Terminal,
+		"identity_present":             len(input.Result.Identity) > 0,
+		"provider_session_present":     input.Result.ProviderSessionID != "" || identityHasSession(input.Result.Identity),
+		"task_canary_present":          input.Result.TaskCanary != "",
+		"execution_evidence_present":   input.Result.ExecutionStarted != nil && input.Result.SideEffectState != "",
+		"provider_prompt_hash_present": input.Result.ProviderPromptHash != "",
+		"provider_prompt_verified":     input.Result.ProviderPromptHash != "" && !promptEvidenceMismatch,
+		"mcp_isolation":                action.Parameters["mcp_isolation"],
+		"contamination_checkpoint":     contaminationCheckpoint,
+		"raw_event_refs":               append([]string(nil), input.Result.RawEventRefs...),
 	})
 	if input.Result.Terminal && (action.Kind == orchestration.ActionLaunch || action.Kind == orchestration.ActionObserve) && attempt.Status == orchestration.AttemptCompleted {
 		attempt.TerminalEventID = event.ID
@@ -2541,6 +2608,11 @@ func copyStringMap(input map[string]string) map[string]string {
 		output[key] = value
 	}
 	return output
+}
+
+func stringParameter(parameters map[string]any, key string) string {
+	value, _ := parameters[key].(string)
+	return strings.TrimSpace(value)
 }
 
 func knownActionKind(kind orchestration.ActionKind) bool {

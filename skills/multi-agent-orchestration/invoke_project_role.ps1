@@ -16,7 +16,8 @@ param(
     [string]$Title = '',
     [string]$StateDir = '',
     [string]$CoordinationDir = '',
-    [string]$PolicyFile = ''
+    [string]$PolicyFile = '',
+    [string]$FrozenInputArtifact = ''
 )
 
 Set-StrictMode -Version Latest
@@ -56,6 +57,22 @@ function Write-EntryResult([hashtable]$Values) {
 
 $consumer = Resolve-CanonicalPath $ConsumerRoot 'ConsumerRoot' 'Container'
 $workspacePath = Resolve-CanonicalPath $Workspace 'Workspace' 'Container'
+$frozenInputPath = ''
+$frozenInputHash = ''
+$frozenInputReceipt = $null
+if (-not [string]::IsNullOrWhiteSpace($FrozenInputArtifact)) {
+    $frozenInputPath = Resolve-CanonicalPath $FrozenInputArtifact 'FrozenInputArtifact' 'Leaf'
+    $frozenInputHash = (Get-FileHash -LiteralPath $frozenInputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $frozenItem = Get-Item -LiteralPath $frozenInputPath
+    $frozenInputReceipt = [ordered]@{
+        name = 'repository-review'
+        path = $frozenInputPath
+        root = $frozenItem.Directory.FullName
+        format = [System.IO.Path]::GetExtension($frozenInputPath).TrimStart('.').ToLowerInvariant()
+        bytes = $frozenItem.Length
+        sha256 = $frozenInputHash
+    }
+}
 $registryPath = Join-Path $consumer '.agents\agent-workflow-project-role-entry.json'
 if (-not (Test-Path -LiteralPath $registryPath -PathType Leaf)) {
     Write-EntryResult ([ordered]@{
@@ -68,6 +85,7 @@ if (-not (Test-Path -LiteralPath $registryPath -PathType Leaf)) {
         use_controller = $false
         spawn_allowed = $true
         gateway_allowed = $false
+        frozen_input = $frozenInputReceipt
         reason = 'project Role managed entry is not installed; use the host ordinary delegation path'
     })
     exit 0
@@ -137,6 +155,7 @@ $arguments = @(
 if (-not [string]::IsNullOrWhiteSpace($Title)) { $arguments += @('--title', $Title) }
 if (-not [string]::IsNullOrWhiteSpace($StateDir)) { $arguments += @('--state-dir', $StateDir) }
 if (-not [string]::IsNullOrWhiteSpace($PolicyFile)) { $arguments += @('--policy-file', $PolicyFile) }
+if (-not [string]::IsNullOrWhiteSpace($frozenInputPath)) { $arguments += @('--frozen-input', $frozenInputPath, '--frozen-input-sha256', $frozenInputHash) }
 $raw = @(& $collaborationBinary @arguments 2>&1)
 if ($LASTEXITCODE -ne 0) {
     throw "project Role managed dispatch failed after routing; direct fallback is forbidden: $($raw -join [Environment]::NewLine)"
@@ -147,6 +166,16 @@ $directive = switch ([string]$route.effective_mode) {
     'direct' { 'ordinary_delegation' }
     'single' { 'execute_sequentially' }
     default { throw "unsupported effective mode: $($route.effective_mode)" }
+}
+$frozenInputOutput = if ([string]::IsNullOrWhiteSpace($frozenInputPath)) { $null } else { $route.plan.steps[0].frozen_inputs[0] }
+if (-not [string]::IsNullOrWhiteSpace($frozenInputPath)) {
+    if ($null -eq $frozenInputOutput) { throw 'project Role route omitted the requested frozen input receipt' }
+    Assert-Equal ([string]$frozenInputOutput.path) $frozenInputPath 'routed frozen input path'
+    Assert-Equal ([string]$frozenInputOutput.root) ([string]$frozenInputReceipt.root) 'routed frozen input root'
+    Assert-Equal ([string]$frozenInputOutput.sha256) $frozenInputHash 'routed frozen input SHA-256'
+    if ([int64]$frozenInputOutput.bytes -ne [int64]$frozenInputReceipt.bytes) {
+        throw "routed frozen input byte length mismatch: actual=$($frozenInputOutput.bytes) expected=$($frozenInputReceipt.bytes)"
+    }
 }
 Write-EntryResult ([ordered]@{
     schema_version = 1
@@ -164,5 +193,6 @@ Write-EntryResult ([ordered]@{
     core_path = $core
     collaboration_path = $collaborationBinary
     bridge_path = [string]$controllerReceipt.binaries.bridge.path
+    frozen_input = $frozenInputOutput
     route = $route
 })

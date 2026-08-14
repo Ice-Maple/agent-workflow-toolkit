@@ -50,7 +50,7 @@ func TestCursorAdapterMapsLaunchObserveAndCompletionIntoCoreCheckpoint(t *testin
 	adapter := cursor.New(os.Args[0])
 	adapter.Environment = []string{"CURSOR_ADAPTER_HELPER=1"}
 	adapter.StartupTimeout = 2 * time.Second
-	running, err := adapter.Launch(t.Context(), cursor.LaunchRequest{Workspace: workspace, Model: binding.Model, Mode: "plan", Permission: binding.Permission, TrustAuthorized: true, Prompt: "return the smoke token", TaskCanary: launch.Attempt.TaskCanary})
+	running, err := adapter.Launch(t.Context(), cursor.LaunchRequest{Workspace: workspace, Model: binding.Model, Mode: "plan", Permission: binding.Permission, TrustAuthorized: true, Prompt: launch.DispatchPrompt, TaskCanary: launch.Attempt.TaskCanary})
 	if err != nil {
 		t.Fatalf("adapter launch = %v", err)
 	}

@@ -16,6 +16,7 @@ type StreamEvent struct {
 	SessionID      string
 	Text           string
 	TextSource     string
+	UserText       string
 	Tool           bool
 	Terminal       bool
 	TerminalStatus string
@@ -26,6 +27,8 @@ type StreamSummary struct {
 	Events         []StreamEvent
 	FinalText      string
 	FinalSource    string
+	ReceivedPrompt string
+	UserEventCount int
 	Terminal       bool
 	TerminalStatus string
 	Raw            []byte
@@ -56,6 +59,10 @@ func (s *StreamSummary) AddLine(line []byte) error {
 		s.FinalText = strings.TrimSpace(event.Text)
 		s.FinalSource = event.TextSource
 	}
+	if event.UserText != "" {
+		s.ReceivedPrompt = event.UserText
+		s.UserEventCount++
+	}
 	if event.Terminal {
 		s.Terminal = true
 		s.TerminalStatus = event.TerminalStatus
@@ -84,9 +91,51 @@ func normalizeEvent(object map[string]any, sequence int) StreamEvent {
 	eventType = strings.ToLower(strings.TrimSpace(eventType))
 	sessionID := firstString(object, "session_id", "sessionId", "thread_id", "threadId", "chat_id", "chatId")
 	text, source := finalText(object, eventType)
+	userText := exactUserText(object, eventType)
 	tool := isToolEvent(object, eventType)
 	terminal, status := terminalEvidence(object, eventType)
-	return StreamEvent{Sequence: sequence, Type: eventType, SessionID: sessionID, Text: text, TextSource: source, Tool: tool, Terminal: terminal, TerminalStatus: status}
+	return StreamEvent{Sequence: sequence, Type: eventType, SessionID: sessionID, Text: text, TextSource: source, UserText: userText, Tool: tool, Terminal: terminal, TerminalStatus: status}
+}
+
+// exactUserText extracts the Provider-visible user message without trimming,
+// joining lines, or normalizing whitespace. Cursor stream-json exposes this
+// event after argv parsing, so it is the authoritative transport evidence.
+func exactUserText(object map[string]any, eventType string) string {
+	if eventType != "user" && eventType != "input" && eventType != "user_message" {
+		return ""
+	}
+	if value, ok := object["text"].(string); ok {
+		return value
+	}
+	if message, ok := object["message"].(map[string]any); ok {
+		if value, ok := message["content"].(string); ok {
+			return value
+		}
+		return exactTextFromContent(message["content"])
+	}
+	return exactTextFromContent(object["content"])
+}
+
+func exactTextFromContent(value any) string {
+	parts, ok := value.([]any)
+	if !ok {
+		return ""
+	}
+	var builder strings.Builder
+	for _, part := range parts {
+		object, ok := part.(map[string]any)
+		if !ok {
+			continue
+		}
+		kind := strings.ToLower(firstString(object, "type", "kind"))
+		if kind != "" && kind != "text" && kind != "input_text" {
+			continue
+		}
+		if text, ok := object["text"].(string); ok {
+			builder.WriteString(text)
+		}
+	}
+	return builder.String()
 }
 
 func finalText(object map[string]any, eventType string) (string, string) {

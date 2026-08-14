@@ -173,6 +173,13 @@ func (r *Runtime) launch(ctx context.Context, action orchestration.HostAction) (
 	if prompt == "" {
 		return orchestration.HostActionResult{}, errors.New("core-issued launch prompt is required")
 	}
+	frozenInputs, frozenErr := frozenInputsFromAction(action)
+	if frozenErr != nil {
+		return orchestration.HostActionResult{}, frozenErr
+	}
+	if len(frozenInputs) > 0 && r.provider != ProviderCursor {
+		return orchestration.HostActionResult{}, fmt.Errorf("frozen read-only inputs are not verified for adapter %q", r.provider)
+	}
 	var result orchestration.HostActionResult
 	switch r.provider {
 	case ProviderClaude:
@@ -192,7 +199,7 @@ func (r *Runtime) launch(ctx context.Context, action orchestration.HostAction) (
 		if mode == "" {
 			mode = "plan"
 		}
-		adapterResult, adapterErr := r.cursor.Launch(ctx, cursor.LaunchRequest{Workspace: r.attempt.Binding.Workspace, Model: r.attempt.Binding.Model, Mode: mode, Permission: r.attempt.Binding.Permission, TrustAuthorized: r.profile.TrustAuthorized, MCPIsolation: r.attempt.MCPIsolation, MCPAllowlist: r.attempt.Binding.MCPAllowlist, Prompt: prompt, TaskCanary: r.attempt.TaskCanary})
+		adapterResult, adapterErr := r.cursor.Launch(ctx, cursor.LaunchRequest{Workspace: r.attempt.Binding.Workspace, Model: r.attempt.Binding.Model, Mode: mode, Permission: r.attempt.Binding.Permission, TrustAuthorized: r.profile.TrustAuthorized, MCPIsolation: r.attempt.MCPIsolation, MCPAllowlist: r.attempt.Binding.MCPAllowlist, Prompt: prompt, TaskCanary: r.attempt.TaskCanary, FrozenInputs: frozenInputs})
 		if adapterErr != nil {
 			return providerFailure(adapterErr), adapterErr
 		}
@@ -379,7 +386,30 @@ func validateLaunchContract(action orchestration.HostAction, attempt orchestrati
 			return errors.New("Role Prompt reference hash mismatch")
 		}
 	}
+	if _, err := frozenInputsFromAction(action); err != nil {
+		return err
+	}
 	return nil
+}
+
+func frozenInputsFromAction(action orchestration.HostAction) ([]orchestration.FrozenInputRef, error) {
+	value, ok := action.Parameters["frozen_inputs"]
+	if !ok || value == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode frozen input contract: %w", err)
+	}
+	var inputs []orchestration.FrozenInputRef
+	if err := json.Unmarshal(raw, &inputs); err != nil {
+		return nil, fmt.Errorf("decode frozen input contract: %w", err)
+	}
+	verified, err := orchestration.VerifyFrozenInputs(inputs)
+	if err != nil {
+		return nil, fmt.Errorf("verify frozen input contract: %w", err)
+	}
+	return verified, nil
 }
 
 func providerFailure(err error) orchestration.HostActionResult {

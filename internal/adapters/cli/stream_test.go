@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestStreamSummaryRejectsToolOnlyTurnAsDelivery(t *testing.T) {
 	summary := ParseJSONL([]byte("{" +
@@ -23,6 +26,18 @@ func TestStreamSummaryExtractsFinalResultAndTerminalEvidence(t *testing.T) {
 		"}"))
 	if !summary.DeliveryComplete() || summary.FinalText != "ADAPTER_SMOKE_OK" || summary.FinalSource != "result.result" {
 		t.Fatalf("final summary = %#v", summary)
+	}
+}
+
+func TestStreamSummaryPreservesProviderVisibleUserPromptExactly(t *testing.T) {
+	prompt := "Framework envelope:\n\n  indented\n```text\n--leading\n```"
+	raw, err := json.Marshal(map[string]any{"type": "user", "session_id": "cursor-session-exact", "message": map[string]any{"role": "user", "content": []map[string]string{{"type": "text", "text": prompt}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := ParseJSONL(raw)
+	if summary.UserEventCount != 1 || summary.ReceivedPrompt != prompt {
+		t.Fatalf("received Prompt count=%d text=%q, want %q", summary.UserEventCount, summary.ReceivedPrompt, prompt)
 	}
 }
 

@@ -126,6 +126,12 @@ func TestCurrentProcessStartMarkerCanBeRevalidated(t *testing.T) {
 	}
 }
 
+func TestOwnerActionTimeoutCoversWindowsCoreSubmission(t *testing.T) {
+	if ownerActionTimeout < 30*time.Second {
+		t.Fatalf("owner action timeout = %s, want at least 30s for Adapter observation plus core result submission", ownerActionTimeout)
+	}
+}
+
 func TestSendOwnerActionRejectsUnavailableOwnerWithoutRelaunch(t *testing.T) {
 	request := validBridgeRequest(t)
 	receipt := OwnerReceipt{

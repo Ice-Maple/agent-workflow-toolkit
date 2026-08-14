@@ -107,13 +107,21 @@ Router 完全未安装时，业务 Skill 的完整正文照常执行；已安装
 以下命令只用于排障，不要求普通用户手写：
 
 ```powershell
+$FrozenRoot = Join-Path $env:TEMP ("agent-review-" + [guid]::NewGuid().ToString('N'))
+$Frozen = & "$ToolkitRoot\tools\orchestration\new_frozen_git_review_input.ps1" `
+  -Workspace $ConsumerRoot -OutputPath (Join-Path $FrozenRoot 'git-review.md') |
+  ConvertFrom-Json
+
 & "$ConsumerRoot\.agents\skills\multi-agent-orchestration\invoke_project_role.ps1" `
   -ConsumerRoot $ConsumerRoot -Workspace $ConsumerRoot `
   -Role 'sample-project/reviewer' -Task '评审当前实际 diff 与测试证据' `
-  -StateDir $StateDir -CoordinationDir $CoordinationDir -PolicyFile $PolicyFile
+  -StateDir $StateDir -CoordinationDir $CoordinationDir -PolicyFile $PolicyFile `
+  -FrozenInputArtifact $Frozen.path
 ```
 
-返回 `direct` 时，宿主使用已校验的 Role Prompt 做普通委派；`single` 时当前 Agent 使用该 Prompt 串行执行且禁止 spawn/Gateway；`framework` 时 Router 创建一个 `count=1` 的冻结 step，再进入相同 Controller/Gateway loop。匹配到 managed Role 后，receipt、Prompt hash、route、preflight 或执行失败均 fail closed。
+`new_frozen_git_review_input.ps1` 只执行 read-only Git 命令，把当前 HEAD、status、staged/unstaged diff 和未跟踪文件 hash 写入专用空目录；Router、Gateway、bridge 和 Adapter 会复核 canonical path、bytes、SHA-256 及目录中没有未声明条目。不要把 artifact 放进业务 workspace 后再让生成动作把自身纳入 diff，也不要在 admission 后改写它。
+
+返回 `direct` 时，宿主使用已校验的 Role Prompt 做普通委派；`single` 时当前 Agent使用该 Prompt 串行执行且禁止 spawn/Gateway；两者都会显式回传 frozen-input receipt，不能静默丢弃。`framework` 时 Router 创建一个 `count=1` 的冻结 step，再进入相同 Controller/Gateway loop。当前 external project-Role frozen-input transport 只对 Cursor 验证，并强制 machine-local profile 使用 `mode=ask` + binding `permission=read-only`：Cursor `plan` 会把评审结论送入 CreatePlan 流程，不能保证交付最终业务 verdict。匹配到 managed Role 后，receipt、Prompt hash、frozen input、route、preflight 或执行失败均 fail closed。
 
 ### 2.3 启用、回退与一键关闭
 
@@ -297,7 +305,7 @@ Gateway 不提供“随便派发”的隐式默认值。Role-first 使用 `role_
       "primary": {
         "role": "sample-workflow/reviewer",
         "adapter": "cursor",
-        "profile_id": "cursor-readonly",
+        "profile_id": "cursor-review-ask",
         "model": "your-registered-cursor-model",
         "reasoning": "high",
         "permission": "read-only",
@@ -307,19 +315,19 @@ Gateway 不提供“随便派发”的隐式默认值。Role-first 使用 `role_
     }
   },
   "adapter_profiles": {
-    "cursor-readonly": {
-      "id": "cursor-readonly",
+    "cursor-review-ask": {
+      "id": "cursor-review-ask",
       "adapter": "cursor",
       "executable": "cursor-agent.exe",
       "trust": "authorized",
-      "mode": "plan",
+      "mode": "ask",
       "profile_hash": "<agent-workflow-bridge --hash-profile 生成的 sha256>"
     }
   }
 }
 ```
 
-Claude 通常配置 `trust=authorized`，需要 MCP 时使用经过验证的 `mcp_config_path`；Codex CLI 使用 `sandbox=read-only`、`approval=untrusted`，custom Provider 的非敏感 route 可放在 `provider_ref/provider_base_url/provider_wire_api/provider_auth/environment_ref`，凭据本身仍留在宿主环境。profile JSON 可以从 policy 拆成独立文件传给 bridge，但内容与 hash 必须相同。
+上例用于需要返回业务结论的 project Role reviewer。普通 Cursor 分析任务仍可使用 `plan`，但携带 `FrozenInputArtifact` 的 project Role preflight 会机械拒绝它；不要用 `plan` 的 terminal/technical release 冒充 reviewer PASS。Claude 通常配置 `trust=authorized`，需要 MCP 时使用经过验证的 `mcp_config_path`；Codex CLI 使用 `sandbox=read-only`、`approval=untrusted`，custom Provider 的非敏感 route 可放在 `provider_ref/provider_base_url/provider_wire_api/provider_auth/environment_ref`，凭据本身仍留在宿主环境。profile JSON 可以从 policy 拆成独立文件传给 bridge，但内容与 hash 必须相同。
 
 ## 6. Role-first 运行闭环
 
@@ -626,7 +634,7 @@ Gateway v1 公开 HostAction 只有：
 
 #### 外部 CLI 路径
 
-使用 `agent-workflow-bridge --preflight` 校验 frozen Binding/profile，再用 `--execute --attempt-id ... --controller-instance-id ...` 拉取并执行唯一 pending HostAction。首次 `launch` 创建临时 owner；后续 `observe`/`cancel_host` 必须命中同一 PID/start marker/loopback endpoint/capability/profile hash，缺失或 stale 时不会重新 launch。bridge 直接把结构化结果提交 Gateway；不要直接 shell 拼接 Provider CLI 后再伪造 core result。
+使用 `agent-workflow-bridge --preflight` 校验 frozen Binding/profile，再用 `--execute --attempt-id ... --controller-instance-id ...` 拉取并执行唯一 pending HostAction。首次 `launch` 创建临时 owner；owner ready 的 15 秒窗口不等待 Cursor Provider session，后者有独立的 2 分钟 cold-start 窗口。后续 `observe`/`cancel_host` 必须命中同一 PID/start marker/loopback endpoint/capability/profile hash，单次 owner action 最多等待 30 秒并服从更早的 caller cancellation；缺失或 stale 时不会重新 launch，请求送达后 response 丢失或到期会返回 `outcome_unknown`。bridge 直接把结构化结果提交 Gateway；不要直接 shell 拼接 Provider CLI 后再伪造 core result。
 
 无论哪条路径，提交结果时都必须使用 action 返回的 exact `action_id` 和 `lease`：
 
@@ -777,15 +785,17 @@ Windows `go test -race` 需要额外 CGO/C 编译器工具链；当前项目不�
 3. machine gate/workspace mode 的 enable→status→direct/single→framework 与一键 disable 返回符合预期；
 4. Role-first route 在 `direct` 不创建 run、`single` 不 spawn、`framework` 才按 `count` 创建 distinct instances；
 5. Role Registry/Prompt hash、machine-local role route、binding 和 external profile hash 均通过 fail-closed 校验；
-6. 所选 Native/Adapter 的真实只读 smoke；external CLI 还要在同一组合测试中覆盖 public bridge launch→跨进程 observe→completion→technical release→cleanup，不能用独立 Adapter smoke 加 fixture bridge 冒充；
+6. 所选 Native/Adapter 的真实只读 smoke；external CLI 还要在同一组合测试中覆盖 public bridge launch→同 owner repeated launch→跨进程 observe→completion→technical release→disable/cleanup，不能用独立 Adapter smoke 加 fixture bridge 冒充；Cursor 还必须验证 Provider 实收 multiline Prompt hash 与 core 签发 hash 相同；
 7. technical release 只推进满足依赖的 `next_ready`，且没有创建 `HumanDecision`、`user-input:` 或业务批准；
 8. failed completion、`delivery_missing`、contamination、outcome unknown 和 cancel 风险拒绝 technical release；
 9. disable 后无新 admission，已有 Attempt 的取消/未知状态与 active-run evidence 一致；仓库无 orphan、secret 或 runtime 文件；
 10. 一次独立 reviewer 对实际 diff、公开入口、测试、receipts、指南与原始 Role-first 目标的检查。
 
+project Role reviewer 若不允许 Shell，还要额外验证：host 生成专用 frozen Git artifact；entry/plan/action 保留其 hash；Cursor `ask + read-only` profile 通过 preflight；Provider final 回显只能从 artifact 读取的 HEAD 或等价 canary；业务 verdict 为 `PASS`/`PASS WITH P2`，而不是仅有 framework technical release。
+
 toolkit 的普通测试已覆盖 version/envelope、Gateway 状态、clean consumer business-Skill entry、project-Role managed dispatch、slow-start owner ready 和 active-owner disable。真实 Provider 组合测试 [`TestRealCursorFrameworkBridgeE2E`](../../internal/bridge/cursor_real_e2e_test.go) 保持 opt-in，并实际使用 public core/bridge 进程；fixture 不计真实 Provider evidence。
 
-legacy adoption hardening 见 [`AWT-adoption-hardening.md`](../../tests/orchestration/evidence/2026-08-11/AWT-adoption-hardening.md)；`d68a143` 的 fixture-only Role-first 证据已被真实组合验收否决，修复与新证据见 [`role-first-real-combination-closure.md`](../../tests/orchestration/evidence/2026-08-14/role-first-real-combination-closure.md)。
+legacy adoption hardening 见 [`AWT-adoption-hardening.md`](../../tests/orchestration/evidence/2026-08-11/AWT-adoption-hardening.md)；`d68a143` 的 fixture-only Role-first 证据已被真实组合验收否决，owner/disable 基础修复见 [`role-first-real-combination-closure.md`](../../tests/orchestration/evidence/2026-08-14/role-first-real-combination-closure.md)，Prompt exactness 与 frozen reviewer 最终闭合见 [`role-first-prompt-and-frozen-review-closure.md`](../../tests/orchestration/evidence/2026-08-14/role-first-prompt-and-frozen-review-closure.md)。
 
 ### 项目上线边界
 

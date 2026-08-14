@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -20,6 +21,7 @@ func main() {
 			time.Sleep(2 * time.Second)
 		}
 		fmt.Println(`{"type":"system","subtype":"init","session_id":"cursor-bridge-session"}`)
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"type": "user", "session_id": "cursor-bridge-session", "message": map[string]any{"role": "user", "content": []map[string]string{{"type": "text", "text": valueAfter(args, "--")}}}})
 		time.Sleep(500 * time.Millisecond)
 		fmt.Println(`{"type":"result","subtype":"success","is_error":false,"result":"ADAPTER_SMOKE_OK"}`)
 	case contains(args, "--permission-mode"):

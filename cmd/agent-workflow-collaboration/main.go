@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -37,6 +39,8 @@ func main() {
 	manifestPath := flag.String("collaboration-file", "", "business Skill collaboration.yaml")
 	projectRole := flag.String("role", "", "registered project Role ID for a one-step managed dispatch")
 	projectTask := flag.String("task", "", "task payload for --role")
+	frozenInputPath := flag.String("frozen-input", "", "host-created read-only input artifact for --role")
+	frozenInputHash := flag.String("frozen-input-sha256", "", "expected SHA-256 for --frozen-input")
 	rolesManifest := flag.String("roles-manifest", "", "Workflow/project roles.yaml")
 	workspace := flag.String("workspace", "", "canonical business workspace")
 	objective := flag.String("objective", "", "business objective preserved in the Task revision")
@@ -51,7 +55,7 @@ func main() {
 		return
 	}
 
-	manifest, err := loadCollaborationInput(*manifestPath, *projectRole, *projectTask)
+	manifest, err := loadCollaborationInput(*manifestPath, *projectRole, *projectTask, *frozenInputPath, *frozenInputHash)
 	if err != nil {
 		fatal(err)
 	}
@@ -146,26 +150,87 @@ func main() {
 	writeJSON(output)
 }
 
-func loadCollaborationInput(manifestPath, projectRole, projectTask string) (collaboration.Manifest, error) {
+func loadCollaborationInput(manifestPath, projectRole, projectTask, frozenInputPath, frozenInputHash string) (collaboration.Manifest, error) {
 	hasManifest := strings.TrimSpace(manifestPath) != ""
 	hasProjectRole := strings.TrimSpace(projectRole) != "" || strings.TrimSpace(projectTask) != ""
 	if hasManifest == hasProjectRole {
 		return collaboration.Manifest{}, errors.New("exactly one of --collaboration-file or --role/--task is required")
 	}
 	if hasManifest {
+		if strings.TrimSpace(frozenInputPath) != "" || strings.TrimSpace(frozenInputHash) != "" {
+			return collaboration.Manifest{}, errors.New("frozen project Role input cannot be combined with --collaboration-file")
+		}
 		return collaboration.Load(manifestPath)
 	}
 	projectRole, projectTask = strings.TrimSpace(projectRole), strings.TrimSpace(projectTask)
 	if projectRole == "" || projectTask == "" {
 		return collaboration.Manifest{}, errors.New("project Role dispatch requires both --role and --task")
 	}
+	var frozenInputs []orchestration.FrozenInputRef
+	if strings.TrimSpace(frozenInputPath) != "" || strings.TrimSpace(frozenInputHash) != "" {
+		input, err := loadFrozenInput(frozenInputPath, frozenInputHash)
+		if err != nil {
+			return collaboration.Manifest{}, err
+		}
+		frozenInputs = []orchestration.FrozenInputRef{input}
+	}
 	return collaboration.Manifest{
 		SchemaVersion:    collaboration.SchemaVersion,
 		RoleDependencies: []string{projectRole},
 		Steps: []orchestration.CollaborationStepSpec{{
-			ID: "project-role", Role: projectRole, Task: projectTask, Count: 1,
+			ID: "project-role", Role: projectRole, Task: projectTask, Count: 1, FrozenInputs: frozenInputs,
 		}},
 	}, nil
+}
+
+func loadFrozenInput(path, expectedHash string) (orchestration.FrozenInputRef, error) {
+	path, expectedHash = strings.TrimSpace(path), strings.ToLower(strings.TrimSpace(expectedHash))
+	if path == "" || expectedHash == "" {
+		return orchestration.FrozenInputRef{}, errors.New("--frozen-input and --frozen-input-sha256 are required together")
+	}
+	if len(expectedHash) != 64 {
+		return orchestration.FrozenInputRef{}, errors.New("frozen input SHA-256 must contain 64 hexadecimal characters")
+	}
+	if _, err := hex.DecodeString(expectedHash); err != nil {
+		return orchestration.FrozenInputRef{}, errors.New("frozen input SHA-256 is not hexadecimal")
+	}
+	absolute, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return orchestration.FrozenInputRef{}, fmt.Errorf("resolve frozen input: %w", err)
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return orchestration.FrozenInputRef{}, fmt.Errorf("canonicalize frozen input: %w", err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil || !info.Mode().IsRegular() {
+		return orchestration.FrozenInputRef{}, errors.New("frozen input must be an accessible regular file")
+	}
+	if info.Size() <= 0 || info.Size() > 16*1024*1024 {
+		return orchestration.FrozenInputRef{}, errors.New("frozen input must be between 1 byte and 16 MiB")
+	}
+	root := filepath.Dir(canonical)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return orchestration.FrozenInputRef{}, fmt.Errorf("read frozen input root: %w", err)
+	}
+	if len(entries) != 1 || entries[0].IsDir() || !strings.EqualFold(entries[0].Name(), filepath.Base(canonical)) {
+		return orchestration.FrozenInputRef{}, errors.New("frozen input must be the only entry in its dedicated read-only root")
+	}
+	raw, err := os.ReadFile(canonical)
+	if err != nil {
+		return orchestration.FrozenInputRef{}, fmt.Errorf("read frozen input: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	actualHash := hex.EncodeToString(sum[:])
+	if !strings.EqualFold(expectedHash, actualHash) {
+		return orchestration.FrozenInputRef{}, fmt.Errorf("frozen input SHA-256 mismatch: expected=%s actual=%s", expectedHash, actualHash)
+	}
+	format := strings.TrimPrefix(strings.ToLower(filepath.Ext(canonical)), ".")
+	if format == "" {
+		format = "text"
+	}
+	return orchestration.FrozenInputRef{Name: "repository-review", Path: canonical, Root: root, Format: format, Bytes: info.Size(), SHA256: actualHash}, nil
 }
 
 func requestedInstances(plan orchestration.CollaborationPlan) int {

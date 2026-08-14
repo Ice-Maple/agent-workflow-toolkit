@@ -100,7 +100,7 @@ Controller 是宿主与核心之间的薄桥接层。当前 Codex App Native 参
 
 1. 在消费仓库加载 `.agents/skills/multi-agent-orchestration`，用 business-Skill registry 识别 active Skill，或用 project-Role registry 识别项目规则点名的 Role；
 2. 只调用 schema-v2 receipt 固定的 core/collaboration/bridge absolute paths；不存在 PATH/global fallback；
-3. 对业务 Skill 读取 `collaboration.yaml`；对项目 Role 创建一个 `count=1` 的单步 plan；两者都调用 pinned `agent-workflow-collaboration` 获取真实 `framework/direct/single` route；
+3. 对业务 Skill 读取 `collaboration.yaml`；对项目 Role 创建一个 `count=1` 的单步 plan，并可绑定 host 生成的 frozen read-only input；两者都调用 pinned `agent-workflow-collaboration` 获取真实 `framework/direct/single` route；
 4. 在 `framework` 模式只处理返回的 ready instances，通过 `prepareCollaborationInstance` 冻结 node/binding/Prompt；
 5. 在 `prepareAttempt` 签发 HostAction 前完成 selected Native host 或 external CLI Adapter capability preflight；
 6. Native 路径执行 App 原生 subagent；external CLI 路径调用 pinned `agent-workflow-bridge`，不在业务仓库拼 Provider 命令；
@@ -152,16 +152,18 @@ role + adapter + model + reasoning + permission + workspace + MCP allowlist
 
 ### 3.5 Native 宿主路径与 external CLI bridge
 
-Codex App Native 是宿主路径，不是第四个 CLI Adapter。三个 external CLI Adapter 由公开 `agent-workflow-bridge` 统一接入：首次 `launch` 建立 detached owner；owner 在 listener 建立、身份注册完成后立即发布 `ready`，不等待 Provider session，Provider session 建立后再转为 `running`。后续 one-shot `observe`/`cancel_host` 必须复用同一 PID/start marker/loopback endpoint/capability/profile hash；owner 缺失或 stale 时不会重新 launch。共享 Runner 负责 argv-only 启动、stdout/stderr 收集、timeout/cancel 和 Windows 进程树清理。
+Codex App Native 是宿主路径，不是第四个 CLI Adapter。三个 external CLI Adapter 由公开 `agent-workflow-bridge` 统一接入：首次 `launch` 建立 detached owner；owner 在 listener 建立、身份注册完成后立即发布 `ready`，不等待 Provider session，Provider session 建立后再转为 `running`。当前 owner ready 窗口为 15 秒，Cursor Provider cold-start 窗口独立为 2 分钟；后续 one-shot `observe`/`cancel_host` 的 owner action 窗口为 30 秒并服从更早的 caller cancellation。它们必须复用同一 PID/start marker/loopback endpoint/capability/profile hash；owner 缺失或 stale 时不会重新 launch，请求已送达但 response deadline 到期时如实返回 `outcome_unknown`。共享 Runner 负责 argv-only 启动、stdout/stderr 收集、timeout/cancel 和 Windows 进程树清理。
 
-Cursor 当前 CLI 把 Prompt 声明为 variadic positional；Windows 下不能把完整 multiline dispatch Prompt 作为单个含换行 argv 传递。Cursor Adapter 会在 `--` option terminator 后按非空行传入 positional segments，避免只收到 envelope 首行，也避免 Prompt 中的 `--force` 等文字被解释为 CLI 参数。
+Cursor CLI 把 Prompt 声明为 variadic positional，多个 positional 会被 Provider 合并为空格分隔的单行。Cursor Adapter 因此始终把完整 Prompt 放在 `--` option terminator 后的一个 argv；Windows 会解析安装目录中的 native `node.exe + index.js`，绕过会重新序列化 multiline argv 的 `.cmd/.ps1` wrapper。Adapter 从 stream-json `user` event 提取 Provider 实收 Prompt，逐字比较并回传 `ProviderPromptHash`；Gateway 将它与 core 签发的 `dispatch_prompt_hash` 比较，缺失为 evidence incomplete，失配为 contamination。
+
+project Role 可携带一个 host 生成的冻结 Git review artifact。Router 只把 canonical path/root/bytes/SHA-256 放入 frozen plan；Gateway admission、dispatch、bridge 和 Cursor Adapter 分层复核，Cursor 只用 `--add-dir` 暴露包含声明文件的专用 root，不把仓库状态复制进 Prompt。当前这条 external transport 只验证 Cursor，并要求 `ask + read-only`：`plan` 可用于分析，但真实回归证明它可能把业务评审结论送入 CreatePlan 而不返回 verdict，因此在 frozen project Role preflight 中 fail closed。
 
 Gateway v1 只把 `launch`、`observe`、`cancel_host` 视为公开 HostAction。launch/cancel control action lease 为 5 分钟，host 启动后应立即回填 running/terminal；可能同步等待真实 Provider 的 observe lease 为 15 分钟，与当前十分钟 reviewer harness 对齐。`send` 和 `cleanup` 保留为 Adapter lifecycle primitive，Gateway 不签发也不接受；Provider 进程与临时资源由 Native host/Adapter runner 的 `finally` 做幂等 cleanup，不形成 Gateway action result。
 
 | 路径 | 当前只读约束 | 身份/交付要点 | MCP 边界 |
 | --- | --- | --- | --- |
 | Codex App Native | 必须使用 App 原生 subagent，不得 shell 启动 Codex 冒充 Native | 由 core action 绑定 host handle、session、workspace 和 canary | 由宿主能力和任务合同显式声明 |
-| Cursor Agent | `plan`/`ask` + `read-only` + 显式 workspace trust | stream-json final + terminal；session mismatch 后污染闩锁 | 当前有 task MCP allowlist 时 fail closed |
+| Cursor Agent | 普通分析可用 `plan`/`ask`；frozen project Role 强制 `ask`；均为 `read-only` + 显式 workspace trust | exact user Prompt hash + stream-json final/terminal；session 或 Prompt mismatch 后污染闩锁 | 当前有 task MCP allowlist 时 fail closed |
 | Claude Code | `read-only` + 显式 trust；Reasoning 受 Adapter 校验 | stream-json session/final/terminal；只允许 core-authorized resume | 需要已验证的 strict/config-isolated 配置 |
 | Codex CLI | `read-only` sandbox + `untrusted` approval + 显式 trust | `--output-last-message` 优先 durable delivery；隔离用户配置 | 任务 allowlist 必须满足 Adapter 的隔离分支 |
 
@@ -355,7 +357,8 @@ protocol v1 的 runtime operation registry 与静态 `request.schema.json` 已�
 | [`AWT-adoption-hardening.md`](../../tests/orchestration/evidence/2026-08-11/AWT-adoption-hardening.md) | 公共接入 E2E、跨进程锁/journal、Skill receipt、真实 Native smoke 与 Cursor closure |
 | [`Project adoption targeted re-check`](../reviews/2026-08-11-project-adoption-cursor-targeted-recheck.md) | AWT-ADOPT-003A/011 最终 PASS，无开放 P0/P1 |
 | [`role-first-implementation-smoke.md`](../../tests/orchestration/evidence/2026-08-13/role-first-implementation-smoke.md) | 历史 `d68a143` 证据；fixture bridge 与真实 Cursor Adapter 分离，不能继续作为组合 acceptance |
-| [`role-first-real-combination-closure.md`](../../tests/orchestration/evidence/2026-08-14/role-first-real-combination-closure.md) | slow-start owner ready、active-owner disable、project Role managed dispatch、multiline Prompt 和真实 Cursor framework E2E |
+| [`role-first-real-combination-closure.md`](../../tests/orchestration/evidence/2026-08-14/role-first-real-combination-closure.md) | slow-start owner ready、active-owner disable 与 project Role managed dispatch 的历史闭合；其中 line-splitting Prompt 结论已被后续真实 probe 否决 |
+| [`role-first-prompt-and-frozen-review-closure.md`](../../tests/orchestration/evidence/2026-08-14/role-first-prompt-and-frozen-review-closure.md) | native multiline Prompt exactness、Provider Prompt hash、frozen Git input、Cursor ask reviewer 与完整生命周期 |
 | [`Role-first targeted re-check`](../reviews/2026-08-14-role-first-real-combination-targeted-recheck.md) | 初审 P1/P2 均 CLOSED，最终 PASS，无新 P0/P1 |
 
 代表性本机结果：本地 helper fresh-process startup 约 31–33 ms，32 MiB touched payload 下 working set 约 40.3 MiB，Windows 进程树取消响应约 189–195 ms，100-event snapshot replace 约 8.5 ms。完整区间和测量边界以 benchmark evidence 为准。

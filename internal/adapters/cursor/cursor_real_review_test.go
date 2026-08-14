@@ -88,7 +88,7 @@ func runRealCursorReview(t *testing.T, config cursorReviewConfig) cursorReviewRu
 	}
 
 	adapter := New(executable)
-	adapter.StartupTimeout = 60 * time.Second
+	adapter.StartupTimeout = DefaultStartupTimeout
 	probeContext, cancelProbe := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancelProbe()
 	preflight, err := adapter.Preflight(probeContext, PreflightRequest{

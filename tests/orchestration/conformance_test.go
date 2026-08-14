@@ -317,6 +317,7 @@ func wave4AdapterHelper() {
 	switch provider {
 	case "cursor":
 		fmt.Printf(`{"type":"system","subtype":"init","session_id":%q}`+"\n", sessionID)
+		printWave4CursorUserEvent(sessionID)
 		fmt.Printf(`{"type":"result","subtype":"success","is_error":false,"result":%q}`+"\n", wave4SmokeToken)
 	case "claude":
 		fmt.Printf(`{"type":"system","subtype":"init","session_id":%q}`+"\n", sessionID)
@@ -384,6 +385,7 @@ func wave4RecoveryTurn(provider, sessionID string) bool {
 	switch provider {
 	case "cursor":
 		fmt.Printf(`{"type":"system","subtype":"init","session_id":%q}`+"\n", sessionID)
+		printWave4CursorUserEvent(sessionID)
 		fmt.Printf(`{"type":"tool_call","name":"Read","input":{}}` + "\n")
 		fmt.Println(`{"type":"turn_ended","status":"success"}`)
 	case "claude":
@@ -406,6 +408,7 @@ func wave4ContaminationTurn(provider string) bool {
 	switch provider {
 	case "cursor":
 		fmt.Printf(`{"type":"system","subtype":"init","session_id":%q}`+"\n", foreign)
+		printWave4CursorUserEvent(foreign)
 		fmt.Printf(`{"type":"result","subtype":"success","is_error":false,"result":%q}`+"\n", "FOREIGN_SESSION")
 	case "claude":
 		fmt.Printf(`{"type":"system","subtype":"init","session_id":%q}`+"\n", foreign)
@@ -436,4 +439,16 @@ func argumentValue(wanted string) string {
 		}
 	}
 	return ""
+}
+
+func printWave4CursorUserEvent(sessionID string) {
+	prompt := ""
+	arguments := os.Args[1:]
+	for index, argument := range arguments {
+		if argument == "--" && index+1 < len(arguments) {
+			prompt = arguments[index+1]
+			break
+		}
+	}
+	fmt.Printf(`{"type":"user","session_id":%q,"message":{"content":[{"type":"text","text":%q}]}}`+"\n", sessionID, prompt)
 }

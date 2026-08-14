@@ -1,5 +1,7 @@
 # Role-first real-combination closure evidence
 
+> Superseded Prompt note: this file preserves the earlier owner/disable closure, but its line-segment Prompt workaround was later proven lossy by a real stream-json user-event probe. The current Prompt/frozen-review contract and evidence are in [`role-first-prompt-and-frozen-review-closure.md`](role-first-prompt-and-frozen-review-closure.md); do not use the segment claims below as current implementation guidance.
+
 - Date: 2026-08-14
 - Scope: Cursor public framework E2E、slow-start owner、active-owner disable、project Role managed dispatch
 - Previous acceptance: `d68a143f1bffbdc800f8caa8cc0659487e8c35ac` 已否决，不再是可 pin 的 Role-first acceptance commit
@@ -14,10 +16,10 @@
 1. `agent-workflow-core --disable` 有两条 nil-map 风险：terminal cancel result 已删除 `latest.Attempts`，以及 legacy top-level `AttemptID` 回退只创建局部 map。现在回退 map 会绑定到 `entry.Attempts`，terminal Attempt 只更新仍 active 的条目，且仅有已证明取消时返回 `cancelled`。
 2. bridge 原先等待 owner receipt 离开 `starting` 才返回，等价于把 15 秒 owner startup timeout 错当成 Provider session timeout。现在 owner 在 listener 建立、run/Attempt 身份注册成功后发布 `ready`，Provider session 后续独立转为 `running`。
 3. 项目 Role Package 原先只有 schema/Prompt 解析，没有 installer、registry 和 managed dispatch。现在由 `install_project_role_package.ps1`、`agent-workflow-project-role-entry.json` 和 `invoke_project_role.ps1` 提供统一入口，Router 用 `--role/--task` 创建单步冻结 plan。
-4. 首次真实组合复跑证明 Cursor 在 Windows argv 路径只收到 multiline dispatch Prompt 的首行。Cursor Adapter 现在在 `--` 后按非空行传递 variadic positional prompt segments；修复后同一真实 E2E 返回精确 canary。
+4. 首次真实组合复跑证明 Cursor 在 Windows argv 路径只收到 multiline dispatch Prompt 的首行。当时采用的“按非空行拆 positional”只让 canary E2E 通过，后来证明 Provider 会把 segments 合并为单行，不能作为无损修复；当前实现已改为 native launcher + 单一 exact argument + Provider Prompt hash。
 5. owner receipt 在 Windows 原子替换窗口可能短暂触发 sharing violation。`OwnerStore.Load` 现在做有界短重试，不把正常发布窗口误判为 stale owner。
 6. 第一轮独立 Cursor review 发现 `ready` owner 的重复 pending `launch` 会被误判 stale。Executor 现在先校验 frozen owner/action identity，再直接返回同一 owner view，不走 IPC 或重新 launch Provider；slow-start E2E 在 session 前连续执行两次 public launch 并核对同一 PID。
-7. 首次 clean-commit real smoke 中 Cursor session 超过 Adapter 默认 30 秒，Attempt 如实进入 `timed_out`。bridge 没有采用 direct smoke 的 45/60 秒覆盖，因此把 Cursor 默认 Provider startup window 调整为 60 秒；这不再与 owner ready timeout 耦合，也不延长 action lease。
+7. 首次 clean-commit real smoke 中 Cursor session 超过 Adapter 默认 30 秒，Attempt 如实进入 `timed_out`。当时先把 Cursor Provider startup window 调整为 60 秒；后续 frozen reviewer 又真实超过该窗口，当前统一合同已进一步调整为 2 分钟。Provider startup 始终与 owner ready timeout 解耦，也不延长 action lease。
 
 ## 定向自动化
 
@@ -40,7 +42,7 @@ PASS
 - Attempt 已是 `running` 时执行真实 core `--disable`，public owner 收到 `cancel_host`，Attempt/owner 终止，disable 返回 `cancelled` 且无 panic；
 - legacy active-run index 只有 top-level `AttemptID`、`Attempts=nil` 时执行 disable，返回 `not_contacted` 且无 panic；
 - fresh consumer 只点名 `sample-workflow/reviewer`，覆盖 zero-install、direct、single、framework、disable、Role Prompt hash、receipt-pinned collaboration binary 与 Prompt tamper fail-closed；
-- multiline Prompt 的所有 segment 均位于 Cursor `--` option terminator 之后。
+- 历史 segment workaround 曾把所有 positional 放在 `--` 后；该项只证明 option safety，不证明 whitespace exactness，已由后续 exact user-event E2E 取代。
 
 ## 真实 Cursor framework E2E
 
@@ -53,7 +55,7 @@ $env:CURSOR_ADAPTER_SMOKE_MODEL = 'cursor-grok-4.6-high'
 go test -count=1 ./internal/bridge -run TestRealCursorFrameworkBridgeE2E -v
 ```
 
-第一次执行在约 197 秒后以“terminal + final delivery，但最终文本不匹配”失败，证明生命周期已贯通但 multiline Prompt 只传到首行；该失败没有计为 PASS。修复 prompt argv 后，同一测试先在 33.87 秒通过；闭合 reviewer finding 后再次运行，在 42.33 秒通过。首次 clean-commit 复跑又因 Cursor session 超过 bridge 使用的默认 30 秒而真实 `timed_out`，同样未计 PASS；默认 Provider startup window 调整为 60 秒后，当前源码在 48.24 秒再次 PASS：
+第一次执行在约 197 秒后以“terminal + final delivery，但最终文本不匹配”失败，证明生命周期已贯通但 multiline Prompt 只传到首行；该失败没有计为 PASS。历史 line-segment workaround 让 canary 测试先在 33.87 秒通过，闭合 owner reviewer finding 后再次在 42.33 秒通过，但它后来被 Provider exactness probe 否决。首次 clean-commit 复跑又因 Cursor session 超过 bridge 使用的默认 30 秒而真实 `timed_out`，同样未计 PASS；当时把 Provider startup window 调整为 60 秒后，生命周期在 48.24 秒通过。当前无损 Prompt 与 2 分钟 startup 合同必须以 superseding evidence 为准：
 
 ```text
 preflight → public bridge launch → owner ready → real Cursor session

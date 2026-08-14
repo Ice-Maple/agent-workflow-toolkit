@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -101,16 +102,33 @@ type roleFirstE2EOptions struct {
 	workspace                        string
 	providerModel                    string
 	providerExecutable               string
+	providerMode                     string
+	role                             string
+	rolePackage                      string
+	roleVersion                      string
+	rolePrompt                       string
 	stepTask                         string
+	frozenInputs                     []orchestration.FrozenInputRef
 	expectedFinalText                string
 	completionDeadline               time.Duration
 	readyDeadline                    time.Duration
 	runAdapterPreflight              bool
 	expectReadyBeforeProviderSession bool
 	disableWhileRunning              bool
+	disableAfterRelease              bool
 }
 
-func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBinary, coreBinary string, options roleFirstE2EOptions) {
+type roleFirstE2EResult struct {
+	RunID                string
+	AttemptID            string
+	FinalText            string
+	DispatchPromptHash   string
+	ProviderPromptHash   string
+	TechnicalReleaseDone bool
+	Disabled             bool
+}
+
+func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBinary, coreBinary string, options roleFirstE2EOptions) roleFirstE2EResult {
 	t.Helper()
 	root := t.TempDir()
 	workspace := options.workspace
@@ -137,13 +155,34 @@ func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBin
 		providerBinary = buildFixtureProvider(t)
 	}
 	profile := fixtureProfile(t, adapter, providerBinary)
-	role := "fixture/reviewer"
+	if options.providerMode != "" {
+		profile.Mode = options.providerMode
+		profile.ProfileHash = orchestration.HashAdapterProfile(profile.AdapterProfile)
+	}
+	role := strings.TrimSpace(options.role)
+	if role == "" {
+		role = "fixture/reviewer"
+	}
+	rolePackage, roleName, ok := strings.Cut(role, "/")
+	if !ok || strings.TrimSpace(rolePackage) == "" || strings.TrimSpace(roleName) == "" || strings.Contains(roleName, "/") {
+		t.Fatalf("test role must be package/name: %q", role)
+	}
+	if options.rolePackage != "" {
+		rolePackage = options.rolePackage
+	}
+	roleVersion := options.roleVersion
+	if roleVersion == "" {
+		roleVersion = "1.0.0"
+	}
 	promptPath := filepath.Join(root, "reviewer.md")
-	prompt := "# Reviewer\n\nReturn the requested token.\n\nTask: {{ task }}\n\nOutput: {{ output_requirements }}\n"
+	prompt := options.rolePrompt
+	if prompt == "" {
+		prompt = "# Reviewer\n\nReturn the requested token.\n\nTask: {{ task }}\n\nOutput: {{ output_requirements }}\n"
+	}
 	if err := os.WriteFile(promptPath, []byte(prompt), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	definition := orchestration.RoleDefinition{ID: role, Package: "fixture", Version: "1.0.0", PromptPath: promptPath, PromptHash: hashText(prompt)}
+	definition := orchestration.RoleDefinition{ID: role, Package: rolePackage, Version: roleVersion, PromptPath: promptPath, PromptHash: hashText(prompt)}
 	providerModel := options.providerModel
 	if providerModel == "" {
 		providerModel = "fixture-model"
@@ -167,7 +206,7 @@ func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBin
 	profilePath := filepath.Join(root, "profile.json")
 	writeJSONFile(t, profilePath, profile)
 	rolesPath := filepath.Join(root, "roles.yaml")
-	rolesYAML := "schema_version: collaboration-roles/v1\npackage: fixture\nversion: 1.0.0\nroles:\n  reviewer:\n    prompt: reviewer.md\n"
+	rolesYAML := "schema_version: collaboration-roles/v1\npackage: " + rolePackage + "\nversion: " + roleVersion + "\nroles:\n  " + roleName + ":\n    prompt: reviewer.md\n"
 	if err := os.WriteFile(rolesPath, []byte(rolesYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +247,7 @@ func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBin
 	if stepTask == "" {
 		stepTask = "Return ADAPTER_SMOKE_OK"
 	}
-	plan := orchestration.CollaborationPlan{SchemaVersion: "collaboration/v1", RolePromptHashes: map[string]string{role: definition.PromptHash}, Steps: []orchestration.CollaborationStepSpec{{ID: "review", Role: role, Task: stepTask}}}
+	plan := orchestration.CollaborationPlan{SchemaVersion: "collaboration/v1", RolePromptHashes: map[string]string{role: definition.PromptHash}, Steps: []orchestration.CollaborationStepSpec{{ID: "review", Role: role, Task: stepTask, FrozenInputs: append([]orchestration.FrozenInputRef(nil), options.frozenInputs...)}}}
 	run, err := core.CreateCollaborationRun(gateway.CreateCollaborationRunInput{TaskID: task.Task.ID, RevisionID: task.Revision.ID, Workspace: workspace, EffectiveMode: orchestration.CollaborationFramework, GateEpoch: status.GateEpoch, Plan: plan, StateDir: stateDir})
 	if err != nil {
 		_ = locks.Release()
@@ -219,6 +258,10 @@ func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBin
 		_ = locks.Release()
 		t.Fatal(err)
 	}
+	if prepared.Preflight.Status != "passed" {
+		_ = locks.Release()
+		t.Fatalf("collaboration frozen-input preflight = %#v", prepared.Preflight)
+	}
 	launch, err := core.PrepareAttempt(gateway.PrepareAttemptInput{NodeID: prepared.Node.ID, ControllerInstanceID: "controller-restart-safe", CollaborationRunID: run.Run.ID, InstanceRunID: prepared.Instance.ID, GateEpoch: status.GateEpoch, RolePromptHash: definition.PromptHash})
 	if err != nil {
 		_ = locks.Release()
@@ -227,6 +270,9 @@ func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBin
 	if err := locks.Release(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		cleanupRoleFirstE2ERun(t, coreBinary, coordinationDir, bridgeStateDir, launch.Attempt.ID)
+	})
 	polled, err := (CoreClient{Executable: coreBinary, StateDir: stateDir, PolicyFile: policyPath, RolesManifest: rolesPath, CoordinationDir: coordinationDir}).PollHostActions(t.Context(), gateway.PollHostActionsInput{AttemptID: launch.Attempt.ID, ControllerInstanceID: "controller-restart-safe"})
 	if err != nil {
 		t.Fatal(err)
@@ -239,6 +285,7 @@ func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBin
 			return orchestration.HashParameters(polled.Actions[0].Parameters)
 		}())
 	}
+	dispatchPromptHash := actionString(polled.Actions[0].Parameters, "dispatch_prompt_hash")
 
 	launchStarted := time.Now()
 	launchOutput := runBridgeCommand(t, bridgeBinary, coreBinary, stateDir, bridgeStateDir, policyPath, rolesPath, coordinationDir, profilePath, launch.Attempt.ID, "controller-restart-safe", "launch")
@@ -341,7 +388,7 @@ func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBin
 			if err != nil || !found || owner.State != "terminal" {
 				t.Fatalf("cancelled owner found=%t err=%v receipt=%#v", found, err, owner)
 			}
-			return
+			return roleFirstE2EResult{RunID: run.Run.ID, AttemptID: launch.Attempt.ID, Disabled: true}
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("bridge owner did not publish a terminal fixture result")
@@ -352,13 +399,20 @@ func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBin
 				t.Fatalf("observe output = %s", lastObserveOutput)
 			}
 		}
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(ownerPollInterval)
 	}
-	if options.expectedFinalText != "" {
-		var observed ExecutionOutput
+	var observed ExecutionOutput
+	if lastObserveOutput != "" {
 		if err := json.Unmarshal([]byte(lastObserveOutput), &observed); err != nil {
 			t.Fatalf("decode terminal observe output: %v\n%s", err, lastObserveOutput)
 		}
+	}
+	if adapter == ProviderCursor {
+		if observed.Result == nil || dispatchPromptHash == "" || !strings.EqualFold(observed.Result.ProviderPromptHash, dispatchPromptHash) {
+			t.Fatalf("Cursor Provider Prompt evidence result=%#v expected_hash=%s", observed.Result, dispatchPromptHash)
+		}
+	}
+	if options.expectedFinalText != "" {
 		if observed.Result == nil || strings.TrimSpace(observed.Result.FinalText) != options.expectedFinalText {
 			t.Fatalf("terminal Provider delivery = %#v", observed.Result)
 		}
@@ -409,6 +463,27 @@ func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBin
 	if err != nil || !found || owner.State != "terminal" {
 		t.Fatalf("owner cleanup receipt found=%t err=%v receipt=%#v", found, err, owner)
 	}
+	result := roleFirstE2EResult{RunID: run.Run.ID, AttemptID: launch.Attempt.ID, DispatchPromptHash: dispatchPromptHash, TechnicalReleaseDone: true}
+	if observed.Result != nil {
+		result.FinalText = observed.Result.FinalText
+		result.ProviderPromptHash = observed.Result.ProviderPromptHash
+	}
+	if options.disableAfterRelease {
+		disableCommand := exec.Command(coreBinary, "--disable", "--coordination-dir", coordinationDir)
+		disableOutput, disableErr := disableCommand.CombinedOutput()
+		if disableErr != nil {
+			t.Fatalf("disable after technical release: %v\n%s", disableErr, disableOutput)
+		}
+		var disabled coordination.DisableResult
+		if err := json.Unmarshal(disableOutput, &disabled); err != nil {
+			t.Fatalf("decode post-release disable output: %v\n%s", err, disableOutput)
+		}
+		if disabled.FrameworkEnabled {
+			t.Fatalf("post-release disable result = %#v", disabled)
+		}
+		result.Disabled = true
+	}
+	return result
 }
 
 func fixtureProfile(t *testing.T, adapter, executable string) Profile {
@@ -500,7 +575,7 @@ func buildCollaborationExecutable(t *testing.T) string {
 
 func runBridgeCommand(t *testing.T, binary, coreBinary, stateDir, bridgeStateDir, policyPath, rolesPath, coordinationDir, profilePath, attemptID, controllerID, kind string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, "--execute", "--core", coreBinary, "--state-dir", stateDir, "--bridge-state-dir", bridgeStateDir, "--policy-file", policyPath, "--roles-manifest", rolesPath, "--coordination-dir", coordinationDir, "--profile-file", profilePath, "--attempt-id", attemptID, "--controller-instance-id", controllerID, "--action-kind", kind)
 	output, err := command.CombinedOutput()
@@ -508,6 +583,42 @@ func runBridgeCommand(t *testing.T, binary, coreBinary, stateDir, bridgeStateDir
 		t.Fatalf("bridge %s: %v\n%s", kind, err, output)
 	}
 	return string(output)
+}
+
+func cleanupRoleFirstE2ERun(t *testing.T, coreBinary, coordinationDir, bridgeStateDir, attemptID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, coreBinary, "--disable", "--coordination-dir", coordinationDir)
+	if output, err := command.CombinedOutput(); err != nil && ctx.Err() == nil {
+		t.Logf("cleanup disable failed: %v output=%s", err, strings.TrimSpace(string(output)))
+	}
+	store, err := NewOwnerStore(bridgeStateDir)
+	if err != nil {
+		t.Logf("cleanup owner store: %v", err)
+		return
+	}
+	receipt, found, err := store.Load(attemptID)
+	if err != nil || !found {
+		return
+	}
+	running, identityErr := processIdentityMatches(receipt.OwnerPID, receipt.OwnerStartMarker)
+	if identityErr != nil || !running {
+		return
+	}
+	var killErr error
+	if runtime.GOOS == "windows" {
+		killErr = exec.Command("taskkill", "/PID", strconv.Itoa(receipt.OwnerPID), "/T", "/F").Run()
+	} else if process, findErr := os.FindProcess(receipt.OwnerPID); findErr != nil {
+		killErr = findErr
+	} else {
+		killErr = process.Kill()
+	}
+	if killErr != nil {
+		t.Logf("cleanup exact owner process %d failed: %v", receipt.OwnerPID, killErr)
+	} else {
+		t.Logf("cleanup forced exact owner process %d after disable did not converge", receipt.OwnerPID)
+	}
 }
 
 func writeJSONFile(t *testing.T, path string, value any) {
