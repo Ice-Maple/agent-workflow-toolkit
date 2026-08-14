@@ -16,6 +16,9 @@ func main() {
 	time.Sleep(50 * time.Millisecond)
 	switch {
 	case contains(args, "--workspace"):
+		if valueAfter(args, "--model") == "fixture-slow-model" {
+			time.Sleep(2 * time.Second)
+		}
 		fmt.Println(`{"type":"system","subtype":"init","session_id":"cursor-bridge-session"}`)
 		time.Sleep(500 * time.Millisecond)
 		fmt.Println(`{"type":"result","subtype":"success","is_error":false,"result":"ADAPTER_SMOKE_OK"}`)

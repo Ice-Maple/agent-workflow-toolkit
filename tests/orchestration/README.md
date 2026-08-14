@@ -100,6 +100,21 @@ This is a closed Cursor implementation/checkpoint slice, not an
 `experimental` declaration. Cross-Adapter Wave 4 conformance is covered by
 `TestWave4ExternalAdapterLifecycleConformance` under `tests/orchestration/`.
 
+The standalone Adapter smoke does not prove the Role-first public bridge. Run
+the separate opt-in combination test before pinning a consumer:
+
+```powershell
+$env:CURSOR_FRAMEWORK_REAL_SMOKE='1'
+$env:CURSOR_ADAPTER_SMOKE_WORKSPACE='E:\projects\agent-workflow-toolkit'
+$env:CURSOR_ADAPTER_SMOKE_MODEL='cursor-grok-4.6-high'
+go test -count=1 ./internal/bridge -run TestRealCursorFrameworkBridgeE2E -v
+```
+
+This test uses public core/bridge processes and covers owner ready, real Cursor
+session startup, cross-process observe, terminal final delivery, completion and
+technical release. The 2026-08-14 closure evidence is
+[`role-first-real-combination-closure.md`](evidence/2026-08-14/role-first-real-combination-closure.md).
+
 The Wave 4 independent Cursor review is also opt-in and uses the same
 read-only, trusted workspace boundary:
 

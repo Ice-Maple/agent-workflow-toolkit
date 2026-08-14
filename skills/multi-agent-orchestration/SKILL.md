@@ -5,24 +5,25 @@ description: Use automatically when a business Skill provides collaboration.yaml
 
 # Multi-Agent Orchestration Controller
 
-This Skill is the framework Router/Controller. A user normally calls the business Skill, not this Skill. The business Skill owns its full workflow and optional `collaboration.yaml`; Workflow/project Role Packages own complete Role Prompt templates; this Skill owns only generic routing and host execution.
+This Skill is the framework Router/Controller. A user normally calls a business Skill or names a registered project Role, not this Skill. The business Skill owns its full workflow and optional `collaboration.yaml`; Workflow/project Role Packages own complete Role Prompt templates; this Skill owns only generic routing and host execution.
 
 ## Role-first entry
 
-When the active business Skill has `collaboration.yaml`:
+During the host's normal Skill/Role dispatch decision:
 
-1. During the host's normal Skill-dispatch decision, treat `.agents/agent-workflow-role-first-entry.json` as the single managed trigger registry. When the selected business Skill is registered, resolve it there and invoke `invoke_business_skill.ps1`; do not require the user or the business Skill to repeat orchestration logic or explicitly name this Controller. This is a managed host-policy contract discovered at task start, not an OS-level hook that can intercept a host which did not discover the installed Controller.
-2. The entry validates `.agents/agent-workflow-toolkit.lock.json` schema v2 and the business Skill/Role receipt, then calls the exact canonical absolute paths in `binaries.core.path`, `binaries.collaboration.path`, and `binaries.bridge.path`. Never use PATH, a global binary, or another checkout as fallback.
-3. If the registry is absent, execute the original business Skill body unchanged (`zero_install`). If installed, honor the entry's directive: `ordinary_delegation` for `direct`, `execute_sequentially` with no spawn/Gateway for `single`, and `framework_controller` only for `framework`.
-4. The collaboration sidecar may contain only `role_dependencies` and steps with `id`, `role`, `task`, `count`, and `after`.
-5. Honor the returned `effective_mode`:
+1. Treat `.agents/agent-workflow-role-first-entry.json` as the managed business-Skill registry. When the selected business Skill is registered, invoke `invoke_business_skill.ps1`; do not require the user or the business Skill to repeat orchestration logic or explicitly name this Controller.
+2. Treat `.agents/agent-workflow-project-role-entry.json` as the managed project-Role registry. When the user or active project instruction asks for a registered Role such as `package/reviewer`, invoke `invoke_project_role.ps1` with the requested task. The project must not create a development Skill merely to reach that Role.
+3. Both entries validate `.agents/agent-workflow-toolkit.lock.json` and their package receipt, then call only the canonical absolute binary paths recorded there. Never use PATH, a global binary, or another checkout as fallback. These are managed host-policy contracts discovered at task start, not OS-level hooks that can intercept a host which did not discover this Controller.
+4. For a business Skill, an absent registry preserves its original body (`zero_install`). For a project Role, an absent registry leaves dispatch to the host's ordinary path. Once a matching managed entry is found, any receipt, hash, route, preflight, execution, or evidence failure is fail closed.
+5. Honor the returned `effective_mode` for either entry:
    - `framework`: use the returned frozen run/instances and continue through TaskGateway;
-   - `direct`: return control to the host's ordinary delegation path and report that independent instance count is not guaranteed;
-   - `single`: do not spawn or call Gateway; the current Agent executes sequentially.
-6. In framework mode, call `prepareCollaborationInstance` only for returned ready instances, run the selected host preflight, then call `prepareAttempt` with the exact `run_id`, `instance_id`, binding, and gate epoch. Never let the business Skill supply Adapter/model/Gateway fields.
-7. For Codex App Native, execute the core-signed action with the App's native capability. For `claude`, `cursor`, or `codexcli`, call the receipt-pinned bridge `--execute`; never compose Provider shell commands in the business repository.
-8. After validated completion, call `recordCollaborationTechnicalRelease`. This may advance only the frozen DAG. It must not create `HumanDecision`, `user-input:*`, `goal:*`, or business approval.
-9. Once framework admission is selected, any role/route/preflight/permission/workspace/MCP, technical-release, contamination, outcome-unknown, cancellation, retry/fallback, or `delivery_missing` error is fail closed. Never retry by switching to `direct`.
+   - `direct`: use the host's ordinary delegation path; for a project Role, load the returned verified Role Prompt and append the requested task;
+   - `single`: do not spawn or call Gateway; the current Agent executes the task using the returned verified Role Prompt.
+6. A business Skill sidecar may contain only `role_dependencies` and steps with `id`, `role`, `task`, `count`, and `after`. A project Role entry creates exactly one step with `count=1`; Adapter/model/Gateway fields still come only from machine-local policy.
+7. In framework mode, call `prepareCollaborationInstance` only for returned ready instances, run the selected host preflight, then call `prepareAttempt` with the exact `run_id`, `instance_id`, binding, and gate epoch.
+8. For Codex App Native, execute the core-signed action with the App's native capability. For `claude`, `cursor`, or `codexcli`, call the receipt-pinned bridge `--execute`; never compose Provider shell commands in the business repository.
+9. After validated completion, call `recordCollaborationTechnicalRelease`. This may advance only the frozen DAG. It must not create `HumanDecision`, `user-input:*`, `goal:*`, or business approval.
+10. Once framework admission is selected, any role/route/preflight/permission/workspace/MCP, technical-release, contamination, outcome-unknown, cancellation, retry/fallback, or `delivery_missing` error is fail closed. Never retry by switching to `direct`.
 
 ## Non-negotiable boundaries
 

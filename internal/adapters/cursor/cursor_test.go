@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,34 @@ func TestInvocationUsesExplicitReadOnlyStreamContract(t *testing.T) {
 	}
 	if args[len(args)-1] != "return the smoke token" {
 		t.Fatalf("prompt was not kept positional and last: %#v", args)
+	}
+}
+
+func TestDefaultStartupTimeoutCoversVerifiedBridgeWindow(t *testing.T) {
+	if DefaultStartupTimeout < 60*time.Second {
+		t.Fatalf("Cursor default startup timeout = %s, want at least 60s for the verified bridge path", DefaultStartupTimeout)
+	}
+}
+
+func TestInvocationPreservesEveryMultilinePromptSegmentAfterOptionTerminator(t *testing.T) {
+	workspace := filepath.Clean(`E:\workspace\authorized`)
+	args, err := (Invocation{Executable: "agent", Workspace: workspace, Model: "cursor-grok-4.6-high", Mode: "plan", Trust: true}).Args("Framework envelope (collaboration/v1):\nrole=sample/reviewer\n\n--force is forbidden prompt text\nReturn CURSOR_FRAMEWORK_OK")
+	if err != nil {
+		t.Fatal(err)
+	}
+	separator := -1
+	for index, value := range args {
+		if value == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 {
+		t.Fatalf("Cursor prompt option terminator is missing: %#v", args)
+	}
+	want := []string{"Framework envelope (collaboration/v1):", "role=sample/reviewer", "--force is forbidden prompt text", "Return CURSOR_FRAMEWORK_OK"}
+	if got := args[separator+1:]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("multiline Cursor prompt args = %#v, want %#v", got, want)
 	}
 }
 

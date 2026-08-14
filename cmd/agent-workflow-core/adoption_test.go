@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"agent-workflow-toolkit/internal/buildinfo"
+	"agent-workflow-toolkit/internal/coordination"
 	"agent-workflow-toolkit/internal/gateway"
 	"agent-workflow-toolkit/internal/orchestration"
 	"agent-workflow-toolkit/internal/policy"
@@ -509,6 +510,118 @@ func TestFreshConsumerBusinessSkillOnlyEntrySupportsHyphenatedSkillName(t *testi
 	}
 	if output, err := exec.Command(powershell, arguments...).CombinedOutput(); err != nil {
 		t.Fatalf("hyphenated business-Skill entry smoke: %v\n%s", err, output)
+	}
+}
+
+func TestFreshConsumerProjectRoleManagedDispatch(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the managed project-Role entry is currently a Windows host path")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is unavailable")
+	}
+	binaries := buildAdoptionBinaries(t)
+	repositoryRoot := filepath.Clean(filepath.Join(mustWorkingDirectory(t), "..", ".."))
+	smoke := filepath.Join(repositoryRoot, "tools", "orchestration", "smoke_project_role_entry.ps1")
+	arguments := []string{
+		"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", smoke,
+		"-ToolkitRoot", repositoryRoot,
+		"-CorePath", binaries.Core,
+		"-CollaborationPath", binaries.Collaboration,
+		"-BridgePath", binaries.Bridge,
+		"-AllowDirty",
+	}
+	output, err := exec.Command(powershell, arguments...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("project-Role managed dispatch smoke: %v\n%s", err, output)
+	}
+	var result struct {
+		Status                  string `json:"status"`
+		ZeroInstall             string `json:"zero_install"`
+		Direct                  string `json:"direct"`
+		Single                  string `json:"single"`
+		Framework               string `json:"framework"`
+		Disable                 string `json:"disable"`
+		Role                    string `json:"role"`
+		RequestedInstances      int    `json:"requested_instances"`
+		ActualInstances         int    `json:"actual_instances"`
+		PinnedCollaborationPath string `json:"pinned_collaboration_path"`
+		TamperFailClosed        bool   `json:"tamper_fail_closed"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode project-Role managed dispatch smoke: %v\n%s", err, output)
+	}
+	if result.Status != "passed" || result.ZeroInstall != "ordinary_delegation" || result.Direct != "ordinary_delegation" || result.Single != "execute_sequentially" || result.Framework != "framework_controller" || result.Disable != "direct" || result.Role != "sample-workflow/reviewer" || result.RequestedInstances != 1 || result.ActualInstances != 1 || !result.TamperFailClosed {
+		t.Fatalf("project-Role managed dispatch result = %#v", result)
+	}
+	if result.PinnedCollaborationPath != binaries.Collaboration {
+		t.Fatalf("project-Role entry did not use receipt-pinned collaboration path: %#v", result)
+	}
+}
+
+func TestDisableLegacySingleAttemptIndexDoesNotPanic(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	stateDir := filepath.Join(root, "state")
+	coordinationDir := filepath.Join(root, "coordination")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binding := orchestration.Binding{Role: "reviewer", Adapter: "codex-native", Model: "fixture-model", Reasoning: "none", Permission: "read-only", Workspace: workspace}
+	config := policy.DefaultConfig()
+	config.RegisteredBindings = []orchestration.Binding{binding}
+	store, err := storage.New(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core, err := gateway.New(store, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := core.CreateTask(gateway.CreateTaskInput{Objective: "legacy active-run fallback", Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := core.ProposeNode(gateway.ProposeNodeInput{TaskID: task.Task.ID, RevisionID: task.Revision.ID, Kind: "review", Role: binding.Role})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.RunPreflight(gateway.RunPreflightInput{NodeID: node.Node.ID, Binding: binding}); err != nil {
+		t.Fatal(err)
+	}
+	launch, err := core.PrepareAttempt(gateway.PrepareAttemptInput{NodeID: node.Node.ID, ControllerInstanceID: "legacy-disable", Binding: &binding})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := coordination.New(coordinationDir, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.SetFrameworkEnabled(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locks, err := manager.AcquireRunLocks(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerErr := manager.RegisterRunUnderLock(storage.ActiveRunEntry{
+		RunID: "legacy-single-attempt", Workspace: workspace, StateDir: stateDir, GateEpoch: status.GateEpoch,
+		AttemptID: launch.Attempt.ID, InstanceID: "legacy-instance", ShutdownStatus: "active",
+	})
+	if releaseErr := locks.Release(); releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
+	if registerErr != nil {
+		t.Fatal(registerErr)
+	}
+	disabled, err := disableAndConverge(manager, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.FrameworkEnabled || len(disabled.Runs) != 1 || disabled.Runs[0].Status != "not_contacted" {
+		t.Fatalf("legacy disable result = %#v", disabled)
 	}
 }
 

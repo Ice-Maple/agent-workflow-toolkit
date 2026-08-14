@@ -26,6 +26,19 @@ func TestPublicBridgeRoleFirstHandoff(t *testing.T) {
 	}
 }
 
+func TestPublicBridgePublishesOwnerReadyBeforeSlowCursorSession(t *testing.T) {
+	runPublicBridgeRoleFirstHandoffWithOptions(t, ProviderCursor, buildBridgeExecutable(t), buildCoreExecutable(t), roleFirstE2EOptions{
+		providerModel:                    "fixture-slow-model",
+		expectReadyBeforeProviderSession: true,
+	})
+}
+
+func TestDisableCancelsActiveExternalOwnerWithoutPanic(t *testing.T) {
+	runPublicBridgeRoleFirstHandoffWithOptions(t, ProviderCursor, buildBridgeExecutable(t), buildCoreExecutable(t), roleFirstE2EOptions{
+		disableWhileRunning: true,
+	})
+}
+
 func TestFreshConsumerReceiptPinnedBridgeRoleFirstHandoff(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("the Role-first installer is currently a Windows adoption path")
@@ -81,15 +94,48 @@ func runPublicBridgeRoleFirstHandoff(t *testing.T, adapter string) {
 
 func runPublicBridgeRoleFirstHandoffWithBinaries(t *testing.T, adapter, bridgeBinary, coreBinary string) {
 	t.Helper()
+	runPublicBridgeRoleFirstHandoffWithOptions(t, adapter, bridgeBinary, coreBinary, roleFirstE2EOptions{})
+}
+
+type roleFirstE2EOptions struct {
+	workspace                        string
+	providerModel                    string
+	providerExecutable               string
+	stepTask                         string
+	expectedFinalText                string
+	completionDeadline               time.Duration
+	readyDeadline                    time.Duration
+	runAdapterPreflight              bool
+	expectReadyBeforeProviderSession bool
+	disableWhileRunning              bool
+}
+
+func runPublicBridgeRoleFirstHandoffWithOptions(t *testing.T, adapter, bridgeBinary, coreBinary string, options roleFirstE2EOptions) {
+	t.Helper()
 	root := t.TempDir()
-	workspace := filepath.Join(root, "workspace")
+	workspace := options.workspace
+	if workspace == "" {
+		workspace = filepath.Join(root, "workspace")
+		if err := os.Mkdir(workspace, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		var err error
+		workspace, err = filepath.Abs(filepath.Clean(workspace))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
+			t.Fatalf("real Provider workspace is unavailable: %s err=%v", workspace, err)
+		}
+	}
 	stateDir := filepath.Join(root, "state")
 	coordinationDir := filepath.Join(root, "coordination")
 	bridgeStateDir := filepath.Join(root, "bridge")
-	if err := os.Mkdir(workspace, 0o700); err != nil {
-		t.Fatal(err)
+	providerBinary := options.providerExecutable
+	if providerBinary == "" {
+		providerBinary = buildFixtureProvider(t)
 	}
-	providerBinary := buildFixtureProvider(t)
 	profile := fixtureProfile(t, adapter, providerBinary)
 	role := "fixture/reviewer"
 	promptPath := filepath.Join(root, "reviewer.md")
@@ -98,7 +144,19 @@ func runPublicBridgeRoleFirstHandoffWithBinaries(t *testing.T, adapter, bridgeBi
 		t.Fatal(err)
 	}
 	definition := orchestration.RoleDefinition{ID: role, Package: "fixture", Version: "1.0.0", PromptPath: promptPath, PromptHash: hashText(prompt)}
-	binding := orchestration.Binding{Role: role, Adapter: adapter, ProfileID: profile.ID, Model: "fixture-model", Reasoning: "none", Permission: "read-only", Workspace: workspace}
+	providerModel := options.providerModel
+	if providerModel == "" {
+		providerModel = "fixture-model"
+	}
+	binding := orchestration.Binding{Role: role, Adapter: adapter, ProfileID: profile.ID, Model: providerModel, Reasoning: "none", Permission: "read-only", Workspace: workspace}
+	if options.runAdapterPreflight {
+		preflightContext, cancelPreflight := context.WithTimeout(t.Context(), 2*time.Minute)
+		defer cancelPreflight()
+		preflight, err := AdapterPreflight(preflightContext, binding, profile)
+		if err != nil || preflight.Status != "passed" {
+			t.Fatalf("real Adapter preflight err=%v result=%#v", err, preflight)
+		}
+	}
 	config := policy.DefaultConfig()
 	config.RegisteredBindings = []orchestration.Binding{binding}
 	config.RoleRoutes = map[string]orchestration.RoleRoute{role: {Role: role, Primary: binding}}
@@ -146,7 +204,11 @@ func runPublicBridgeRoleFirstHandoffWithBinaries(t *testing.T, adapter, bridgeBi
 		_ = locks.Release()
 		t.Fatal(err)
 	}
-	plan := orchestration.CollaborationPlan{SchemaVersion: "collaboration/v1", RolePromptHashes: map[string]string{role: definition.PromptHash}, Steps: []orchestration.CollaborationStepSpec{{ID: "review", Role: role, Task: "Return ADAPTER_SMOKE_OK"}}}
+	stepTask := options.stepTask
+	if stepTask == "" {
+		stepTask = "Return ADAPTER_SMOKE_OK"
+	}
+	plan := orchestration.CollaborationPlan{SchemaVersion: "collaboration/v1", RolePromptHashes: map[string]string{role: definition.PromptHash}, Steps: []orchestration.CollaborationStepSpec{{ID: "review", Role: role, Task: stepTask}}}
 	run, err := core.CreateCollaborationRun(gateway.CreateCollaborationRunInput{TaskID: task.Task.ID, RevisionID: task.Revision.ID, Workspace: workspace, EffectiveMode: orchestration.CollaborationFramework, GateEpoch: status.GateEpoch, Plan: plan, StateDir: stateDir})
 	if err != nil {
 		_ = locks.Release()
@@ -178,19 +240,55 @@ func runPublicBridgeRoleFirstHandoffWithBinaries(t *testing.T, adapter, bridgeBi
 		}())
 	}
 
+	launchStarted := time.Now()
 	launchOutput := runBridgeCommand(t, bridgeBinary, coreBinary, stateDir, bridgeStateDir, policyPath, rolesPath, coordinationDir, profilePath, launch.Attempt.ID, "controller-restart-safe", "launch")
 	if !strings.Contains(launchOutput, `"action_kind": "launch"`) {
 		t.Fatalf("launch output = %s", launchOutput)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		freshStore, err := storage.New(stateDir)
+	if options.expectReadyBeforeProviderSession {
+		readyDeadline := options.readyDeadline
+		if readyDeadline <= 0 {
+			readyDeadline = time.Second
+		}
+		if elapsed := time.Since(launchStarted); elapsed >= readyDeadline {
+			t.Fatalf("bridge launch waited for the slow Provider session instead of owner readiness: %s", elapsed)
+		}
+		ownerStore, err := NewOwnerStore(bridgeStateDir)
 		if err != nil {
 			t.Fatal(err)
 		}
+		owner, found, err := ownerStore.Load(launch.Attempt.ID)
+		if err != nil || !found || owner.State != "ready" || owner.ProviderSessionID != "" {
+			t.Fatalf("slow-start owner readiness found=%t err=%v receipt=%#v", found, err, owner)
+		}
+		repeatedStarted := time.Now()
+		repeatedOutput := runBridgeCommand(t, bridgeBinary, coreBinary, stateDir, bridgeStateDir, policyPath, rolesPath, coordinationDir, profilePath, launch.Attempt.ID, "controller-restart-safe", "launch")
+		if elapsed := time.Since(repeatedStarted); elapsed >= readyDeadline {
+			t.Fatalf("repeated launch did not join the ready owner: %s", elapsed)
+		}
+		var repeated ExecutionOutput
+		if err := json.Unmarshal([]byte(repeatedOutput), &repeated); err != nil {
+			t.Fatalf("decode repeated launch output: %v\n%s", err, repeatedOutput)
+		}
+		if repeated.Owner.State != "ready" || repeated.Owner.OwnerPID != owner.OwnerPID || repeated.Result != nil {
+			t.Fatalf("repeated launch owner = %#v result=%#v", repeated.Owner, repeated.Result)
+		}
+	}
+	completionDeadline := options.completionDeadline
+	if completionDeadline <= 0 {
+		completionDeadline = 10 * time.Second
+	}
+	deadline := time.Now().Add(completionDeadline)
+	lastObserveOutput := ""
+	for {
 		freshLocks, _, err := manager.AcquireRunLocksForConvergence(run.Run.ID)
 		if err != nil {
 			t.Fatalf("acquire collaboration convergence locks: %v", err)
+		}
+		freshStore, err := storage.New(stateDir)
+		if err != nil {
+			_ = freshLocks.Release()
+			t.Fatal(err)
 		}
 		freshCore, err := gateway.NewWithCoordinationLocked(freshStore, config, manager)
 		if err != nil {
@@ -208,16 +306,62 @@ func runPublicBridgeRoleFirstHandoffWithBinaries(t *testing.T, adapter, bridgeBi
 		if attempt.Attempt.Status != orchestration.AttemptRunning && attempt.Attempt.Status != orchestration.AttemptLaunching {
 			t.Fatalf("bridge launch attempt = %#v", attempt.Attempt)
 		}
+		if options.disableWhileRunning && attempt.Attempt.Status == orchestration.AttemptRunning {
+			disableCommand := exec.Command(coreBinary, "--disable", "--coordination-dir", coordinationDir)
+			disableOutput, disableErr := disableCommand.CombinedOutput()
+			if disableErr != nil {
+				t.Fatalf("disable active external owner: %v\n%s", disableErr, disableOutput)
+			}
+			var disabled coordination.DisableResult
+			if err := json.Unmarshal(disableOutput, &disabled); err != nil {
+				t.Fatalf("decode disable output: %v\n%s", err, disableOutput)
+			}
+			if disabled.FrameworkEnabled || len(disabled.Runs) != 1 || disabled.Runs[0].RunID != run.Run.ID || disabled.Runs[0].Status != "cancelled" {
+				t.Fatalf("disable result = %#v", disabled)
+			}
+			cancelLocks, _, err := manager.AcquireRunLocksForConvergence(run.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cancelledCore, err := gateway.NewWithCoordinationLocked(store, config, manager)
+			if err != nil {
+				_ = cancelLocks.Release()
+				t.Fatal(err)
+			}
+			cancelledAttempt, err := cancelledCore.GetAttempt(gateway.GetAttemptInput{AttemptID: launch.Attempt.ID})
+			_ = cancelLocks.Release()
+			if err != nil || cancelledAttempt.Attempt.Status != orchestration.AttemptCancelled {
+				t.Fatalf("cancelled Attempt err=%v attempt=%#v", err, cancelledAttempt.Attempt)
+			}
+			ownerStore, err := NewOwnerStore(bridgeStateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, found, err := ownerStore.Load(launch.Attempt.ID)
+			if err != nil || !found || owner.State != "terminal" {
+				t.Fatalf("cancelled owner found=%t err=%v receipt=%#v", found, err, owner)
+			}
+			return
+		}
 		if time.Now().After(deadline) {
 			t.Fatal("bridge owner did not publish a terminal fixture result")
 		}
 		if attempt.Attempt.Status == orchestration.AttemptRunning {
-			observeOutput := runBridgeCommand(t, bridgeBinary, coreBinary, stateDir, bridgeStateDir, policyPath, rolesPath, coordinationDir, profilePath, launch.Attempt.ID, "controller-restart-safe", "observe")
-			if !strings.Contains(observeOutput, `"action_kind": "observe"`) {
-				t.Fatalf("observe output = %s", observeOutput)
+			lastObserveOutput = runBridgeCommand(t, bridgeBinary, coreBinary, stateDir, bridgeStateDir, policyPath, rolesPath, coordinationDir, profilePath, launch.Attempt.ID, "controller-restart-safe", "observe")
+			if !strings.Contains(lastObserveOutput, `"action_kind": "observe"`) {
+				t.Fatalf("observe output = %s", lastObserveOutput)
 			}
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+	if options.expectedFinalText != "" {
+		var observed ExecutionOutput
+		if err := json.Unmarshal([]byte(lastObserveOutput), &observed); err != nil {
+			t.Fatalf("decode terminal observe output: %v\n%s", err, lastObserveOutput)
+		}
+		if observed.Result == nil || strings.TrimSpace(observed.Result.FinalText) != options.expectedFinalText {
+			t.Fatalf("terminal Provider delivery = %#v", observed.Result)
+		}
 	}
 	completionLocks, _, err := manager.AcquireRunLocksForConvergence(run.Run.ID)
 	if err != nil {

@@ -25,7 +25,7 @@ const (
 	Provider              = "cursor"
 	DefaultExecutable     = "agent"
 	DefaultMode           = "plan"
-	DefaultStartupTimeout = 30 * time.Second
+	DefaultStartupTimeout = 60 * time.Second
 )
 
 type CapabilityStatus string
@@ -264,9 +264,17 @@ func (i Invocation) Args(prompt string) ([]string, error) {
 	} else if i.ContinueLatest {
 		args = append(args, "--continue")
 	}
-	// Cursor's -p/--print is a flag; the prompt itself is a positional
-	// argument. Keeping it last avoids accidental interpretation as an option.
-	args = append(args, prompt)
+	// Cursor declares prompt as a variadic positional. On Windows, a newline in
+	// one argv element is truncated by the current Cursor launcher. Pass each
+	// non-empty line as its own positional after the option terminator so the
+	// complete Role-first dispatch prompt reaches the Provider without any
+	// prompt text being reinterpreted as a CLI option.
+	args = append(args, "--")
+	for _, line := range strings.Split(strings.ReplaceAll(prompt, "\r\n", "\n"), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			args = append(args, line)
+		}
+	}
 	return args, nil
 }
 

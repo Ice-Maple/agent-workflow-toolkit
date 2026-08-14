@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -60,9 +61,22 @@ func (s *OwnerStore) Load(attemptID string) (OwnerReceipt, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return OwnerReceipt{}, false, nil
+	var raw []byte
+	for attempt := 0; attempt < 20; attempt++ {
+		raw, err = os.ReadFile(path)
+		if err == nil {
+			break
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return OwnerReceipt{}, false, nil
+		}
+		if runtime.GOOS != "windows" {
+			return OwnerReceipt{}, false, err
+		}
+		// Windows can briefly reject a reader while the owner atomically
+		// replaces its receipt. A bounded retry keeps cross-process polling
+		// from turning that normal publication window into a stale owner.
+		time.Sleep(5 * time.Millisecond)
 	}
 	if err != nil {
 		return OwnerReceipt{}, false, err

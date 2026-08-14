@@ -117,6 +117,15 @@ func (e Executor) Execute(ctx context.Context) (ExecutionOutput, error) {
 	if err := validateOwnerForRequest(receipt, request); err != nil {
 		return ExecutionOutput{}, err
 	}
+	if action.Kind == orchestration.ActionLaunch {
+		if receipt.ActionID != action.ID {
+			return ExecutionOutput{}, errors.New("owner_mismatch: launch action does not match the existing owner")
+		}
+		// The detached owner may have registered and returned ready before the
+		// Provider publishes a session. A repeated public launch poll must join
+		// that owner, not attempt IPC execution or manufacture a stale owner.
+		return ExecutionOutput{SchemaVersion: BridgeSchema, AttemptID: attempt.ID, ActionID: action.ID, ActionKind: action.Kind, Owner: publicOwnerReceipt(receipt)}, nil
+	}
 	result, err := sendOwnerAction(ctx, receipt, action)
 	if err != nil {
 		return ExecutionOutput{}, err
@@ -176,7 +185,7 @@ func validateOwnerForRequest(receipt OwnerReceipt, request Request) error {
 	if receipt.AttemptID != request.AttemptID || receipt.Provider != normalizeProvider(request.Attempt.Binding.Adapter) || receipt.ProfileID != request.Profile.ID || !strings.EqualFold(receipt.ProfileHash, request.Profile.ProfileHash) || !samePath(receipt.Workspace, request.Attempt.Binding.Workspace) {
 		return errors.New("owner_mismatch: receipt does not match the frozen Attempt/profile/workspace")
 	}
-	if receipt.State != "starting" && receipt.State != "running" {
+	if receipt.State != "starting" && receipt.State != "ready" && receipt.State != "running" {
 		return fmt.Errorf("stale_owner: owner receipt is in %s state", receipt.State)
 	}
 	if !isLoopbackEndpoint(receipt.Endpoint) {

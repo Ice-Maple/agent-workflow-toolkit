@@ -86,7 +86,36 @@ agent-workflow-collaboration.exe `
 
 Router 完全未安装时，业务 Skill 的完整正文照常执行；已安装但 gate 默认关闭时为 `direct`；`single` 由当前 Agent 串行执行且禁止 spawn/Gateway；`framework` 才进入 Controller/Gateway。一旦 framework admission 已选择，Role/route/preflight/permission/workspace/MCP 或运行证据失败必须 fail closed，不允许偷偷改走 `direct`。
 
-### 2.2 启用、回退与一键关闭
+### 2.2 项目 Role managed dispatch
+
+普通代码仓库或 Workflow 仓库自身开发可以只安装项目 Role Package，不必为 `designer`、`implementer`、`reviewer` 再造一个开发 Skill：
+
+```powershell
+& "$ToolkitRoot\tools\orchestration\install_project_role_package.ps1" `
+  -ToolkitRoot $ToolkitRoot -ConsumerRoot $ConsumerRoot `
+  -RolePackage $ProjectRolePackage `
+  -CorePath $Core -CollaborationPath $Collaboration -BridgePath $Bridge
+
+& "$ToolkitRoot\tools\orchestration\install_project_role_package.ps1" `
+  -ToolkitRoot $ToolkitRoot -ConsumerRoot $ConsumerRoot `
+  -RolePackage $ProjectRolePackage `
+  -CorePath $Core -CollaborationPath $Collaboration -BridgePath $Bridge -Check
+```
+
+安装器复制 Role Package 和 Controller，写入 project-Role receipt 及 `.agents\agent-workflow-project-role-entry.json`。新建宿主任务后，项目规则只需写“调用 `sample-project/reviewer` 评审当前修改”；Controller 在正常 Role-dispatch 决策中解析 registry 并调用 `invoke_project_role.ps1`。这仍是 task-start discovery 后的 managed policy，不是 OS hook。
+
+以下命令只用于排障，不要求普通用户手写：
+
+```powershell
+& "$ConsumerRoot\.agents\skills\multi-agent-orchestration\invoke_project_role.ps1" `
+  -ConsumerRoot $ConsumerRoot -Workspace $ConsumerRoot `
+  -Role 'sample-project/reviewer' -Task '评审当前实际 diff 与测试证据' `
+  -StateDir $StateDir -CoordinationDir $CoordinationDir -PolicyFile $PolicyFile
+```
+
+返回 `direct` 时，宿主使用已校验的 Role Prompt 做普通委派；`single` 时当前 Agent 使用该 Prompt 串行执行且禁止 spawn/Gateway；`framework` 时 Router 创建一个 `count=1` 的冻结 step，再进入相同 Controller/Gateway loop。匹配到 managed Role 后，receipt、Prompt hash、route、preflight 或执行失败均 fail closed。
+
+### 2.3 启用、回退与一键关闭
 
 Role-first 安装保持零行为变化。需要启用 framework 时，必须显式配置同一个 machine-local coordination root：
 
@@ -121,6 +150,8 @@ E:\projects\sample-project\              # 具体项目
   ├─ .agents\agent-workflow-toolkit.lock.json   # 三 binary/Skill 来源 receipt
   ├─ .agents\agent-workflow-role-first-<skill>.lock.json
   ├─ .agents\agent-workflow-role-first-entry.json # 统一 managed business-Skill trigger registry
+  ├─ .agents\agent-workflow-project-role-<package>.lock.json
+  ├─ .agents\agent-workflow-project-role-entry.json # 统一 managed project-Role registry
   └─ reports\agent-review.md                    # 显式交付物，可按项目规则决定是否提交
 
 %LOCALAPPDATA%\agent-workflow-toolkit\
@@ -204,7 +235,7 @@ binary 必须构建到 checkout 外；如果把 `bin/` 之类未忽略目录写�
 
 项目升级时先归档旧 receipt 和 evidence，使用新的 version-specific state-dir，再构建、重装、`-Check` 和 smoke。当前没有 state migration：不要让新 binary 写旧 state-dir，也不要让多个 checkout 共享同一个 state-dir。
 
-普通 Role-first 接入应使用第 2.1 节的 `install_role_first_skill.ps1`，并以相同参数执行 `-Check`；它会同时委托 canonical Controller installer 校验 `.agents\agent-workflow-toolkit.lock.json`，避免只安装业务 Skill 而漏掉 Controller receipt。
+业务 Skill 接入使用第 2.1 节的 `install_role_first_skill.ps1`；项目 Role 接入使用第 2.2 节的 `install_project_role_package.ps1`。两者都必须以相同参数执行 `-Check`，并委托 canonical Controller installer 校验 `.agents\agent-workflow-toolkit.lock.json`。
 
 ## 5. 准备本机 Role route 与 Adapter profile
 
@@ -581,7 +612,7 @@ $batch = Invoke-TaskGateway @{
 
 #### Native 路径
 
-Controller 必须从消费仓库加载 `.agents/skills/multi-agent-orchestration/SKILL.md`，由 managed entry 在路由前以 `-Check` 核验 receipt，并仅调用 receipt 中三个 absolute paths；PATH 或全局旧 binary 不是 fallback。该副本的上游合同见 [`skills/multi-agent-orchestration/SKILL.md`](../../skills/multi-agent-orchestration/SKILL.md)、[`invoke_business_skill.ps1`](../../skills/multi-agent-orchestration/invoke_business_skill.ps1) 和 [`native-action-contract.md`](../../skills/multi-agent-orchestration/references/native-action-contract.md)。没有 pending core action 时禁止启动 subagent。
+Controller 必须从消费仓库加载 `.agents/skills/multi-agent-orchestration/SKILL.md`，由 business-Skill 或 project-Role managed entry 在路由前核验 receipt，并仅调用 receipt 中三个 absolute paths；PATH 或全局旧 binary 不是 fallback。该副本的上游合同见 [`skills/multi-agent-orchestration/SKILL.md`](../../skills/multi-agent-orchestration/SKILL.md)、[`invoke_business_skill.ps1`](../../skills/multi-agent-orchestration/invoke_business_skill.ps1)、[`invoke_project_role.ps1`](../../skills/multi-agent-orchestration/invoke_project_role.ps1) 和 [`native-action-contract.md`](../../skills/multi-agent-orchestration/references/native-action-contract.md)。没有 pending core action 时禁止启动 subagent。
 
 Gateway v1 公开 HostAction 只有：
 
@@ -742,19 +773,19 @@ Windows `go test -race` 需要额外 CGO/C 编译器工具链；当前项目不�
 至少完成：
 
 1. clean pinned checkout 构建三个公开 binary，三者 `--version` 的 version/protocol/maturity/revision/dirty 一致，且 revision 与 commit 一致、`dirty=false`；
-2. Role-first installer 安装业务 Skill、Role Package 和 Controller，canonical 与 role-first 两份 receipt 的 `-Check` 均通过，并在新宿主任务中确认发现；
+2. 按入口类型安装业务 Skill或项目 Role Package；canonical receipt 与对应 entry receipt 的 `-Check` 均通过，并在新宿主任务中确认发现；
 3. machine gate/workspace mode 的 enable→status→direct/single→framework 与一键 disable 返回符合预期；
 4. Role-first route 在 `direct` 不创建 run、`single` 不 spawn、`framework` 才按 `count` 创建 distinct instances；
 5. Role Registry/Prompt hash、machine-local role route、binding 和 external profile hash 均通过 fail-closed 校验；
-6. 所选 Native/Adapter 的真实只读 smoke；external CLI 还要覆盖 public bridge launch→跨进程 observe→completion→technical release→cleanup；
+6. 所选 Native/Adapter 的真实只读 smoke；external CLI 还要在同一组合测试中覆盖 public bridge launch→跨进程 observe→completion→technical release→cleanup，不能用独立 Adapter smoke 加 fixture bridge 冒充；
 7. technical release 只推进满足依赖的 `next_ready`，且没有创建 `HumanDecision`、`user-input:` 或业务批准；
 8. failed completion、`delivery_missing`、contamination、outcome unknown 和 cancel 风险拒绝 technical release；
 9. disable 后无新 admission，已有 Attempt 的取消/未知状态与 active-run evidence 一致；仓库无 orphan、secret 或 runtime 文件；
 10. 一次独立 reviewer 对实际 diff、公开入口、测试、receipts、指南与原始 Role-first 目标的检查。
 
-toolkit 的普通测试已经把这条公开路径固化在 [`cmd/agent-workflow-core/adoption_test.go`](../../cmd/agent-workflow-core/adoption_test.go)：它覆盖 version/envelope、完整 create→propose→preflight→attempt→action→completion→approve、`delivery_missing` revision、8 进程同 request 串行、structured busy error 和 clean consumer Skill 安装/检查。真实 Provider smoke 仍保持 opt-in，不由 fixture 冒充。
+toolkit 的普通测试已覆盖 version/envelope、Gateway 状态、clean consumer business-Skill entry、project-Role managed dispatch、slow-start owner ready 和 active-owner disable。真实 Provider 组合测试 [`TestRealCursorFrameworkBridgeE2E`](../../internal/bridge/cursor_real_e2e_test.go) 保持 opt-in，并实际使用 public core/bridge 进程；fixture 不计真实 Provider evidence。
 
-legacy adoption hardening 见 [`AWT-adoption-hardening.md`](../../tests/orchestration/evidence/2026-08-11/AWT-adoption-hardening.md)；最新 Role-first clean-consumer、三 CLI public bridge handoff、Codex App Native smoke、technical-release 拒绝矩阵和独立 closure 见 [`role-first-implementation-smoke.md`](../../tests/orchestration/evidence/2026-08-13/role-first-implementation-smoke.md)。
+legacy adoption hardening 见 [`AWT-adoption-hardening.md`](../../tests/orchestration/evidence/2026-08-11/AWT-adoption-hardening.md)；`d68a143` 的 fixture-only Role-first 证据已被真实组合验收否决，修复与新证据见 [`role-first-real-combination-closure.md`](../../tests/orchestration/evidence/2026-08-14/role-first-real-combination-closure.md)。
 
 ### 项目上线边界
 
@@ -766,10 +797,10 @@ legacy adoption hardening 见 [`AWT-adoption-hardening.md`](../../tests/orchestr
 
 ```text
 固定 toolkit 版本并在 checkout 外构建 core/collaboration/bridge
-  → 安装并核验业务 Skill + Role Package + Controller receipts
+  → 安装并核验业务 Skill或项目 Role + Controller receipts
   → version-specific state-dir + coordination root + strict 本机 role route/profile
   → 显式 enable machine gate，并把 workspace 设为 framework
-  → 调用业务 Skill；agent-workflow-collaboration 创建冻结 run/ready instances
+  → 调用业务 Skill或点名项目 Role；agent-workflow-collaboration 创建冻结 run/ready instances
   → prepareCollaborationInstance + prepareAttempt
   → Codex App Native 或 external CLI public bridge
   → completion evidence + technical release + next_ready
@@ -777,4 +808,4 @@ legacy adoption hardening 见 [`AWT-adoption-hardening.md`](../../tests/orchestr
   → 保存项目侧试用记录
 ```
 
-这条路径不要求继续开发 Wave 5。Codex App Native 使用宿主原生能力；Cursor/Claude/Codex CLI 的统一 public bridge 已实现并验收，不再由下游自行组合 Provider shell。
+这条路径不要求继续开发 Wave 5。Codex App Native 使用宿主原生能力；Cursor/Claude/Codex CLI 使用统一 public bridge，不再由下游自行组合 Provider shell。正式 pin 前仍必须以目标 Adapter 跑一次同链路真实 smoke。

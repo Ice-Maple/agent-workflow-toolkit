@@ -272,8 +272,9 @@ func disableAndConverge(manager *coordination.Manager, lockTimeout time.Duration
 		attempts := entry.Attempts
 		if len(attempts) == 0 && entry.AttemptID != "" {
 			attempts = map[string]storage.ActiveAttemptEntry{entry.AttemptID: {AttemptID: entry.AttemptID, InstanceID: entry.InstanceID, OwnerPID: entry.OwnerPID, OwnerStartMarker: entry.OwnerStartMarker, OwnerEndpoint: entry.OwnerEndpoint, OwnerCapabilityHash: entry.OwnerCapabilityHash, OwnerStateDir: entry.OwnerStateDir}}
+			entry.Attempts = attempts
 		}
-		status.Status = "not_contacted"
+		status.Status = ""
 		for attemptID, attemptEntry := range attempts {
 			attemptStatus, convergenceErr := convergeDisabledAttempt(manager, entry, attemptEntry, attemptID, lockTimeout)
 			if convergenceErr != nil && attemptStatus == "" {
@@ -284,6 +285,9 @@ func disableAndConverge(manager *coordination.Manager, lockTimeout time.Duration
 			if disableStatusPriority(attemptStatus) > disableStatusPriority(status.Status) {
 				status.Status = attemptStatus
 			}
+		}
+		if status.Status == "" {
+			status.Status = "not_contacted"
 		}
 		locks, _, lockErr := manager.AcquireRunLocksForConvergence(entry.RunID)
 		if lockErr != nil {
@@ -301,7 +305,13 @@ func disableAndConverge(manager *coordination.Manager, lockTimeout time.Duration
 		}
 		latest.ShutdownStatus = status.Status
 		for attemptID, attempted := range entry.Attempts {
-			current := latest.Attempts[attemptID]
+			current, stillActive := latest.Attempts[attemptID]
+			if !stillActive {
+				// A terminal cancel result removes the Attempt from the active
+				// index before convergence reacquires the locks. Do not recreate
+				// that terminal Attempt merely to persist shutdown metadata.
+				continue
+			}
 			current.ShutdownStatus = attempted.ShutdownStatus
 			latest.Attempts[attemptID] = current
 		}

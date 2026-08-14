@@ -35,6 +35,8 @@ type routeOutput struct {
 func main() {
 	showVersion := flag.Bool("version", false, "print the collaboration router version")
 	manifestPath := flag.String("collaboration-file", "", "business Skill collaboration.yaml")
+	projectRole := flag.String("role", "", "registered project Role ID for a one-step managed dispatch")
+	projectTask := flag.String("task", "", "task payload for --role")
 	rolesManifest := flag.String("roles-manifest", "", "Workflow/project roles.yaml")
 	workspace := flag.String("workspace", "", "canonical business workspace")
 	objective := flag.String("objective", "", "business objective preserved in the Task revision")
@@ -49,7 +51,7 @@ func main() {
 		return
 	}
 
-	manifest, err := collaboration.Load(*manifestPath)
+	manifest, err := loadCollaborationInput(*manifestPath, *projectRole, *projectTask)
 	if err != nil {
 		fatal(err)
 	}
@@ -142,6 +144,28 @@ func main() {
 	output.ActualInstances = len(run.Instances)
 	output.Task, output.Run = &task, &run
 	writeJSON(output)
+}
+
+func loadCollaborationInput(manifestPath, projectRole, projectTask string) (collaboration.Manifest, error) {
+	hasManifest := strings.TrimSpace(manifestPath) != ""
+	hasProjectRole := strings.TrimSpace(projectRole) != "" || strings.TrimSpace(projectTask) != ""
+	if hasManifest == hasProjectRole {
+		return collaboration.Manifest{}, errors.New("exactly one of --collaboration-file or --role/--task is required")
+	}
+	if hasManifest {
+		return collaboration.Load(manifestPath)
+	}
+	projectRole, projectTask = strings.TrimSpace(projectRole), strings.TrimSpace(projectTask)
+	if projectRole == "" || projectTask == "" {
+		return collaboration.Manifest{}, errors.New("project Role dispatch requires both --role and --task")
+	}
+	return collaboration.Manifest{
+		SchemaVersion:    collaboration.SchemaVersion,
+		RoleDependencies: []string{projectRole},
+		Steps: []orchestration.CollaborationStepSpec{{
+			ID: "project-role", Role: projectRole, Task: projectTask, Count: 1,
+		}},
+	}, nil
 }
 
 func requestedInstances(plan orchestration.CollaborationPlan) int {

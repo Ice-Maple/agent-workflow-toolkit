@@ -171,6 +171,11 @@ func runOwnerProcess(bootstrapPath string) error {
 			return fmt.Errorf("register collaboration owner: %w", err)
 		}
 	}
+	receipt.State = "ready"
+	if err := store.Save(receipt); err != nil {
+		_ = listener.Close()
+		return fmt.Errorf("publish bridge owner ready state: %w", err)
+	}
 	server := &ownerServer{runtime: runtime, core: bootstrap.Core, store: store, receipt: receipt, listener: listener, marker: marker, done: make(chan struct{})}
 	server.receipt = receipt
 	result, executionErr := server.execute(context.Background(), bootstrap.Request.Action)

@@ -1,8 +1,8 @@
 # Agent Workflow Toolkit
 
-面向 Agent 工作方式、能力扩展和工程实践的通用工具仓库。多 Agent 协同 MVP 的 Wave 0–4 与 role-first U0–U3 已完成：Codex App Native 宿主路径、三个 external CLI Adapter、Role Package、三态路由和 technical release 的受控只读执行均已验收为 `experimental`；Wave 5 尚未启动。
+面向 Agent 工作方式、能力扩展和工程实践的通用工具仓库。多 Agent 协同 MVP 的 Wave 0–4 已验收为受控只读 `experimental`；Role-first U0–U3 已实现业务 Skill 与项目 Role 两类 managed entry，但项目接入必须固定到包含真实 Cursor framework 组合回归的新 acceptance commit，不能继续固定已被组合缺陷否决的 `d68a143`。Wave 5 尚未启动。
 
-Role-first installer 会用 schema-v2 receipt 固定同一 clean revision 的 core、collaboration、bridge 三个 binary，并安装统一 managed business-Skill entry。正常用户只调用业务 Skill；`zero-install/direct/single/framework` 路由由 Controller 一处承载，不要求业务 Skill 复制底层编排。
+Role-first installer 会用 schema-v2 receipt 固定同一 clean revision 的 core、collaboration、bridge 三个 binary，并安装统一 managed entry。正常用户只调用业务 Skill或在项目规则中点名已注册 Role；`zero-install/direct/single/framework` 路由由 Controller 一处承载，不要求业务仓库复制底层编排。
 
 ## 仓库定位
 

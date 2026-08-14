@@ -3,7 +3,7 @@
 - 文档用途：技术讨论、方案评审和阶段汇报
 - 当前成熟度：`experimental`
 - 当前能力边界：Codex App Native 宿主路径 + Cursor Agent、Claude Code、Codex CLI 三个 external CLI Adapter
-- 验收基线：Wave 0–4 `experimental` + project-adoption hardening + role-first U0–U3；Wave 5 领域试点尚未启动
+- 验收基线：Wave 0–4 `experimental` + project-adoption hardening；Role-first U0–U3 当前实现包含 business-Skill/project-Role managed entry 与真实 Cursor framework 组合回归；Wave 5 领域试点尚未启动
 
 ## 1. 执行摘要
 
@@ -20,11 +20,13 @@
 
 因此，它解决的核心问题是“如何可靠地派发、恢复和验收一次 Agent 执行”，而不是提供 daemon、看板、长驻队列或生产级自治平台。
 
+最小业务逻辑仍只有 `Role + task → machine-local route → Adapter → response`。当前额外层不是新增业务能力，而是四类工程保护：Gateway 保存动作/完成证据，Coordination 处理关闭与并发，Bridge owner 保留跨进程 session，installer receipt 固定本机版本。任何一层如果没有同链路真实组合测试，都不能仅凭分层单测宣称入口可用；`d68a143` 正是因此被后续验收否决。
+
 ## 2. 总体架构
 
 ```mermaid
 flowchart LR
-    Domain["业务 Skill / Domain Workflow<br/>目标、role/task/count/after、业务验收"]
+    Domain["业务 Skill / 项目 Role<br/>目标、role/task/count/after、业务验收"]
     Roles["Role Package<br/>roles.yaml + complete Prompt"]
     Router["agent-workflow-collaboration<br/>framework / direct / single"]
     Coordination["Coordination<br/>machine gate + workspace mode + active-run index"]
@@ -96,16 +98,16 @@ Adapter、model、Reasoning、permission、workspace 和 machine-local profile �
 
 Controller 是宿主与核心之间的薄桥接层。当前 Codex App Native 参考入口是 [`skills/multi-agent-orchestration/SKILL.md`](../../skills/multi-agent-orchestration/SKILL.md)。它必须：
 
-1. 在消费仓库加载业务 Skill 和 `.agents/skills/multi-agent-orchestration`，由统一 managed entry registry 识别 active business Skill，核验 Controller、业务 Skill 与 Role Package receipts；
+1. 在消费仓库加载 `.agents/skills/multi-agent-orchestration`，用 business-Skill registry 识别 active Skill，或用 project-Role registry 识别项目规则点名的 Role；
 2. 只调用 schema-v2 receipt 固定的 core/collaboration/bridge absolute paths；不存在 PATH/global fallback；
-3. 读取业务 Skill 的 `collaboration.yaml`，调用 pinned `agent-workflow-collaboration` 获取真实 `framework/direct/single` route；
+3. 对业务 Skill 读取 `collaboration.yaml`；对项目 Role 创建一个 `count=1` 的单步 plan；两者都调用 pinned `agent-workflow-collaboration` 获取真实 `framework/direct/single` route；
 4. 在 `framework` 模式只处理返回的 ready instances，通过 `prepareCollaborationInstance` 冻结 node/binding/Prompt；
 5. 在 `prepareAttempt` 签发 HostAction 前完成 selected Native host 或 external CLI Adapter capability preflight；
 6. Native 路径执行 App 原生 subagent；external CLI 路径调用 pinned `agent-workflow-bridge`，不在业务仓库拼 Provider 命令；
 7. 原样保留 action ID、sequence、lease、parameters hash、run/instance/gate epoch 和 Provider identity；
 8. 完成证据通过后请求 `recordCollaborationTechnicalRelease` 推进冻结 DAG；普通 legacy node 仍停在人工检查点。
 
-业务 Skill 始终是用户入口。宿主在 task-start 发现 Controller 后，于正常 Skill-dispatch 决策中执行 managed registry；这不是 OS-level interception。Router 未安装时原 Skill 正文完整执行；默认关闭时为 direct；single 禁止 spawn/Gateway；framework 才进入 Controller。一旦 framework admission 后，Role/route/preflight/permission/workspace/MCP 或运行证据失败必须 fail closed，不得回退 direct。安装或升级后仍需新建宿主任务，这是明确的人工边界。
+业务 Skill或项目 Role 始终是用户入口。宿主在 task-start 发现 Controller 后，于正常 Skill/Role-dispatch 决策中执行 managed registry；这不是 OS-level interception。Router 未安装时原 Skill 正文完整执行或项目 Role走普通委派；默认关闭时为 direct；single 禁止 spawn/Gateway；framework 才进入 Controller。一旦匹配 managed entry 并进入 framework admission，Role/route/preflight/permission/workspace/MCP 或运行证据失败必须 fail closed。安装或升级后仍需新建宿主任务，这是明确的人工边界。
 
 Controller 不得自行认为“Agent 已完成”、制造 action、绕过 preflight、静默 fallback 或把 Provider 成功退出当成人工批准。
 
@@ -150,7 +152,9 @@ role + adapter + model + reasoning + permission + workspace + MCP allowlist
 
 ### 3.5 Native 宿主路径与 external CLI bridge
 
-Codex App Native 是宿主路径，不是第四个 CLI Adapter。三个 external CLI Adapter 由公开 `agent-workflow-bridge` 统一接入：首次 `launch` 建立 detached owner，后续 one-shot `observe`/`cancel_host` 必须复用同一 PID/start marker/loopback endpoint/capability/profile hash；owner 缺失或 stale 时不会重新 launch。共享 Runner 负责 argv-only 启动、stdout/stderr 收集、timeout/cancel 和 Windows 进程树清理。
+Codex App Native 是宿主路径，不是第四个 CLI Adapter。三个 external CLI Adapter 由公开 `agent-workflow-bridge` 统一接入：首次 `launch` 建立 detached owner；owner 在 listener 建立、身份注册完成后立即发布 `ready`，不等待 Provider session，Provider session 建立后再转为 `running`。后续 one-shot `observe`/`cancel_host` 必须复用同一 PID/start marker/loopback endpoint/capability/profile hash；owner 缺失或 stale 时不会重新 launch。共享 Runner 负责 argv-only 启动、stdout/stderr 收集、timeout/cancel 和 Windows 进程树清理。
+
+Cursor 当前 CLI 把 Prompt 声明为 variadic positional；Windows 下不能把完整 multiline dispatch Prompt 作为单个含换行 argv 传递。Cursor Adapter 会在 `--` option terminator 后按非空行传入 positional segments，避免只收到 envelope 首行，也避免 Prompt 中的 `--force` 等文字被解释为 CLI 参数。
 
 Gateway v1 只把 `launch`、`observe`、`cancel_host` 视为公开 HostAction。launch/cancel control action lease 为 5 分钟，host 启动后应立即回填 running/terminal；可能同步等待真实 Provider 的 observe lease 为 15 分钟，与当前十分钟 reviewer harness 对齐。`send` 和 `cleanup` 保留为 Adapter lifecycle primitive，Gateway 不签发也不接受；Provider 进程与临时资源由 Native host/Adapter runner 的 `finally` 做幂等 cleanup，不形成 Gateway action result。
 
@@ -167,7 +171,7 @@ Role-first 是 opt-in：machine gate 默认关闭，workspace 默认 `direct`。
 
 framework run 冻结当前 gate epoch，并写入 machine-local active-run index。admission 和推进遵守 `machine gate → active-run index → canonical state-dir` 锁顺序；Controller/bridge 在新 instance、poll、non-terminal result 和后续 action 前重读 gate/run identity，Gateway 在持锁临界区做最终校验，避免 TOCTOU。
 
-`--disable` 先关闭新 admission 并递增 epoch，再收敛索引中的所有 Attempt；它只报告能证明的 `cancelled/cancel_pending/not_contacted/stale_owner/outcome_unknown`，不会把请求已送达但响应丢失误报为已取消。disable 后只允许提交已执行 action 的真实结果、执行已签发的 cancel/observe 和记录 terminal/unknown，不允许新 launch、retry、fallback 或 DAG 推进。
+`--disable` 先关闭新 admission 并递增 epoch，再收敛索引中的所有 Attempt；它只报告能证明的 `cancelled/cancel_pending/not_contacted/stale_owner/outcome_unknown`，不会把请求已送达但响应丢失误报为已取消。terminal cancel result 可以先从 active index 删除 Attempt，disable convergence 只更新仍 active 的条目，不会向 nil map 写入或重新制造已终止 Attempt。disable 后只允许提交已执行 action 的真实结果、执行已签发的 cancel/observe 和记录 terminal/unknown，不允许新 launch、retry、fallback 或 DAG 推进。
 
 ### 3.7 File Store 与 artifact
 
@@ -217,16 +221,16 @@ Attempt: launching → running → completed
 
 ## 5. 一次节点执行的控制流
 
-Role-first 是普通业务接入主线：
+Role-first 是普通业务 Skill和项目 Role的统一接入主线：
 
 ```mermaid
 sequenceDiagram
-    participant B as Business Skill
+    participant B as Business Skill / Project Role
     participant R as Collaboration Router
     participant G as TaskGateway
     participant H as Native Host / CLI Bridge
 
-    B->>R: collaboration.yaml + Role Package + objective
+    B->>R: collaboration.yaml 或 one-step Role task + Role Package
     R->>R: resolve machine gate and workspace mode
     alt direct or single
         R-->>B: effective mode and truthful degradation
@@ -320,7 +324,8 @@ durable last message、已识别的 structured agent message、plain final stdou
 5. [`agent-workflow-collaboration`](../../cmd/agent-workflow-collaboration/main.go) 的 role-first 三态路由/运行创建入口；
 6. [`agent-workflow-bridge`](../../cmd/agent-workflow-bridge/main.go) 的 external CLI preflight/HostAction 入口；
 7. [`invoke_business_skill.ps1`](../../skills/multi-agent-orchestration/invoke_business_skill.ps1) 与 `.agents/agent-workflow-role-first-entry.json` 的统一业务 Skill 入口；
-8. 项目内显式 artifact 合同。
+8. [`invoke_project_role.ps1`](../../skills/multi-agent-orchestration/invoke_project_role.ps1)、[`install_project_role_package.ps1`](../../tools/orchestration/install_project_role_package.ps1) 与 project-Role registry 的统一项目 Role入口；
+9. 项目内显式 artifact 合同。
 
 `internal/` 下的 Go 包不能被其他 Go module 直接 import。这是有意的仓库边界：具体项目应通过 CLI/protocol 使用核心，而不是依赖内部实现。
 
@@ -349,7 +354,9 @@ protocol v1 的 runtime operation registry 与静态 `request.schema.json` 已�
 | [`W4-experimental-acceptance.md`](../../tests/orchestration/evidence/2026-08-11/W4-experimental-acceptance.md) | 四条受控只读路径正式验收为 `experimental` |
 | [`AWT-adoption-hardening.md`](../../tests/orchestration/evidence/2026-08-11/AWT-adoption-hardening.md) | 公共接入 E2E、跨进程锁/journal、Skill receipt、真实 Native smoke 与 Cursor closure |
 | [`Project adoption targeted re-check`](../reviews/2026-08-11-project-adoption-cursor-targeted-recheck.md) | AWT-ADOPT-003A/011 最终 PASS，无开放 P0/P1 |
-| [`role-first-implementation-smoke.md`](../../tests/orchestration/evidence/2026-08-13/role-first-implementation-smoke.md) | clean-consumer 安装、三态 route、三 CLI public bridge handoff、真实 Codex App Native role-first、technical release 与独立 closure PASS |
+| [`role-first-implementation-smoke.md`](../../tests/orchestration/evidence/2026-08-13/role-first-implementation-smoke.md) | 历史 `d68a143` 证据；fixture bridge 与真实 Cursor Adapter 分离，不能继续作为组合 acceptance |
+| [`role-first-real-combination-closure.md`](../../tests/orchestration/evidence/2026-08-14/role-first-real-combination-closure.md) | slow-start owner ready、active-owner disable、project Role managed dispatch、multiline Prompt 和真实 Cursor framework E2E |
+| [`Role-first targeted re-check`](../reviews/2026-08-14-role-first-real-combination-targeted-recheck.md) | 初审 P1/P2 均 CLOSED，最终 PASS，无新 P0/P1 |
 
 代表性本机结果：本地 helper fresh-process startup 约 31–33 ms，32 MiB touched payload 下 working set 约 40.3 MiB，Windows 进程树取消响应约 189–195 ms，100-event snapshot replace 约 8.5 ms。完整区间和测量边界以 benchmark evidence 为准。
 
@@ -362,7 +369,7 @@ protocol v1 的 runtime operation registry 与静态 `request.schema.json` 已�
 - session/workspace/canary 污染可冻结、可审计；
 - Windows 进程、原子写、长日志和交付恢复有自动化证据；
 - 公共项目接入路径已有 versioned state、跨进程锁、request journal、strict policy、role admission 和可核验 Skill receipt；
-- role-first U0–U3、clean-consumer 安装、public bridge 三 CLI handoff、Codex App Native role-first smoke、独立 closure 和全量回归均已完成；
+- role-first U0–U3 已实现 business-Skill/project-Role managed entry；`d68a143` 的错误组合验收已撤销，后续 acceptance 必须包含 slow-start、active-owner disable 与真实 Cursor framework E2E；
 - protocol runtime operation 与 static schema 已由 conformance test 保持一致；
 - Provider、model 和 role 仍可扩展，不依赖永久枚举。
 
